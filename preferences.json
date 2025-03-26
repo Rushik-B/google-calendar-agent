@@ -1,0 +1,50 @@
+[
+  {
+    "backgroundColor": "#cca6ac",
+    "colorId": "21",
+    "description": "",
+    "id": "rushikbusiness@gmail.com",
+    "primary": true,
+    "summary": "Home"
+  },
+  {
+    "backgroundColor": "#9fc6e7",
+    "colorId": "15",
+    "description": "",
+    "id": "261cea4449a8d63e987e6a56da36c9c4cb0b0429a230511955b42d86fb60b048@group.calendar.google.com",
+    "primary": false,
+    "summary": "CMPT 213"
+  },
+  {
+    "backgroundColor": "#9a9cff",
+    "colorId": "17",
+    "description": "",
+    "id": "6bdf04d4ad030c196923f35b06858017dc7beea6f7019430a46664b6c7a66318@group.calendar.google.com",
+    "primary": false,
+    "summary": "CMPT 276"
+  },
+  {
+    "backgroundColor": "#ac725e",
+    "colorId": "1",
+    "description": "",
+    "id": "624f6649a64e824674c2db9b0a08f65025d717b8ad7e37c47342ab1dc8b753a0@group.calendar.google.com",
+    "primary": false,
+    "summary": "CMPT 105W"
+  },
+  {
+    "backgroundColor": "#cd74e6",
+    "colorId": "23",
+    "description": "",
+    "id": "3c0270a1be0d863c7bf2af0892b8c59d9e7de0133ba568cfc33f6554d5003495@group.calendar.google.com",
+    "primary": false,
+    "summary": "CMPT 310"
+  },
+  {
+    "backgroundColor": "#9fc6e7",
+    "colorId": "15",
+    "description": "",
+    "id": "f73467aaf0fe39410e76ead78bb938e1414e839b3811cbc152d5644d11be929f@group.calendar.google.com",
+    "primary": false,
+    "summary": "Work"
+  }
+]
