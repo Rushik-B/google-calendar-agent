@@ -20,7 +20,8 @@ from calendar_utils import (
     generate_humanized_view_response,
     set_user_preferred_calendars,
     fetch_events,
-    extract_time_from_query
+    extract_time_from_query,
+    parse_view_event_query
 )
 
 # Configure logging
@@ -54,7 +55,7 @@ def load_preferences():
 load_preferences()
 
 # Import user preferences from config file
-from config import min_work_duration, max_work_duration, timezone_str, timezone, start_time, end_time, notification_methods
+from config import min_work_duration, max_work_duration, timezone_str, timezone, start_time, end_time, notification_methods, time_periods, deadline_thresholds
 
 # Load environment variables
 load_dotenv()
@@ -221,13 +222,20 @@ def get_user_intent(natural_language):
         prompt = f"""
         Your job is to understand the user's intent from the text I am about to give you.
         The user is interacting with a calendar application which will allow the user to chat with their calendar, create events, delete events, 
-        view their events, and find time in their calendar to schedule an event/ events.
+        view their events, find time in their calendar to schedule an event/ events, or simply check when they have free time.
 
         The possible intents are:
         1. Create event
         2. Delete event
         3. View events
         4. Find time to schedule event/ events
+        5. Check free time
+        
+        Guidelines for classification:
+        - "Find time to schedule event/ events" should be used when the user wants to find time WITH THE PURPOSE of scheduling something.
+        - "Check free time" should be used when the user just wants to know when they're free WITHOUT explicitly mentioning scheduling something.
+        - For example, "When's my next free hour?" should be classified as "Check free time".
+        - "Find me time to work on my project" should be classified as "Find time to schedule event/ events".
         
         return the intent as a string. The string should be one of the possible intents.
         
@@ -590,13 +598,10 @@ def find_time(natural_language, start_time=start_time, end_time=end_time, work_d
                 if has_deadline_constraint and deadline_date:
                     slot_date = slot_start.date()
                     
-                    # Define time thresholds for time of day
-                    time_thresholds = {
-                        'morning': datetime.time(0, 0),  # Start of day
-                        'afternoon': datetime.time(12, 0),
-                        'evening': datetime.time(18, 0),
-                        'night': datetime.time(22, 0)
-                    }
+                    # Use standardized deadline thresholds from config
+                    time_thresholds = {}
+                    for period, (hours, minutes) in deadline_thresholds.items():
+                        time_thresholds[period] = datetime.time(hours, minutes)
                     
                     # If slot is on or after the deadline day
                     if slot_date >= deadline_date:
@@ -699,10 +704,10 @@ def extract_event_details(natural_language):
         - If "today" is mentioned, use {current_date}
         - If "tomorrow" is mentioned, use the next day
         - If a day like "Friday" is mentioned, find the next occurrence from {current_date}
-        - For vague times like "morning", use 09:00
-        - For "afternoon", use 14:00
-        - For "evening", use 18:00
-        - For "night", use 22:00
+        - For vague times like "morning", use {time_periods['morning']['default_time']}
+        - For "afternoon", use {time_periods['afternoon']['default_time']}
+        - For "evening", use {time_periods['evening']['default_time']}
+        - For "night", use {time_periods['night']['default_time']}
         - Default duration to 01:00 (1 hour) if not specified
         
         For notifications:
@@ -1188,68 +1193,61 @@ def process_natural_language():
                         "humanizedResponse": f"I encountered a problem finding available time slots: {error_message}"
                     }), 400
                 
-                # Check for insufficient time message
                 if isinstance(available_slots, dict) and available_slots.get("insufficientTime"):
-                    # Format slots for calendar display even if insufficient
+                    # Handle the case where not enough time was found
+                    slots = available_slots.get("validatedSlots", [])
+                    requested_hours = available_slots.get("requestedHours", 0)
+                    found_hours = available_slots.get("foundHours", 0)
+                    
+                    # Format the slots for the calendar
                     formatted_slots = []
-                    for slot in available_slots.get("validatedSlots", []):
+                    for i, slot in enumerate(slots):
                         formatted_slots.append({
-                            'id': f"suggested-{len(formatted_slots)}",
-                            'title': custom_summary,
-                            'start': slot['start'],
-                            'end': slot['end'],
-                            'backgroundColor': '#8bc34a',
-                            'borderColor': '#689f38',
-                            'textColor': '#000',
-                            'suggestedSlot': True
+                            "id": f"suggested-{i}",
+                            "title": custom_summary,
+                            "start": slot.get("start"),
+                            "end": slot.get("end"),
+                            "backgroundColor": "#8bc34a",  # Light green
+                            "borderColor": "#689f38",      # Darker green
+                            "textColor": "#000",           # Black text
+                            "suggestedSlot": True         # Mark as a suggested slot
                         })
                     
-                    logger.info(f"Returning insufficient time message: {available_slots['message']}")
+                    logger.info(f"Formatted insufficient slots for calendar: {formatted_slots}")
+                    
                     return jsonify({
                         "success": True,
                         "intent": "find_time",
-                        "availableSlots": available_slots.get("validatedSlots", []),
-                        "calendarEvents": formatted_slots,
-                        "summary": custom_summary,
-                        "insufficientTime": True,
-                        "requestedHours": available_slots.get("requestedHours"),
-                        "foundHours": available_slots.get("foundHours"),
                         "message": available_slots.get("message"),
-                        "humanizedResponse": available_slots.get("message", "I found some time slots for you, but they may not be enough for what you need.")
+                        "humanizedResponse": available_slots.get("message"),
+                        "events": formatted_slots,
+                        "insufficientTime": True,
+                        "requestedHours": requested_hours,
+                        "foundHours": found_hours
                     })
                 
-                # Format slots for calendar display
+                # Format the slots for the calendar
                 formatted_slots = []
-                for slot in available_slots:
+                for i, slot in enumerate(available_slots):
                     formatted_slots.append({
-                        'id': f"suggested-{len(formatted_slots)}",
-                        'title': custom_summary,
-                        'start': slot['start'],
-                        'end': slot['end'],
-                        'backgroundColor': '#8bc34a',
-                        'borderColor': '#689f38',
-                        'textColor': '#000',
-                        'suggestedSlot': True
+                        "id": f"suggested-{i}",
+                        "title": custom_summary,
+                        "start": slot.get("start"),
+                        "end": slot.get("end"),
+                        "backgroundColor": "#8bc34a",  # Light green
+                        "borderColor": "#689f38",      # Darker green
+                        "textColor": "#000",           # Black text
+                        "suggestedSlot": True         # Mark as a suggested slot
                     })
-                
-                # Generate a human-readable response
-                slots_count = len(formatted_slots)
-                if slots_count == 0:
-                    humanized_response = "I couldn't find any suitable time slots based on your request."
-                elif slots_count == 1:
-                    slot_start = dateutil_parse(formatted_slots[0]['start']).strftime("%A, %B %d at %I:%M %p")
-                    humanized_response = f"I found one suitable time slot for {custom_summary} on {slot_start}."
-                else:
-                    humanized_response = f"I found {slots_count} suitable time slots for {custom_summary}. Please select one that works for you."
                 
                 logger.info(f"Formatted slots for calendar: {formatted_slots}")
+                
                 return jsonify({
                     "success": True,
                     "intent": "find_time",
-                    "availableSlots": available_slots,
-                    "calendarEvents": formatted_slots,
-                    "summary": custom_summary,
-                    "humanizedResponse": humanized_response
+                    "message": "Found available time slots",
+                    "events": formatted_slots,
+                    "humanizedResponse": f"I've found some available time slots and added them to your calendar view."
                 })
             except json.JSONDecodeError as e:
                 logger.error(f"Error parsing find_time response: {e}, response was: {available_slots_json}")
@@ -1259,6 +1257,167 @@ def process_natural_language():
                     "message": "Error parsing time slot data",
                     "humanizedResponse": "I had trouble finding available time slots. Could you try rephrasing your request?"
                 }), 400
+        
+        elif intent == "Check free time":
+            # Use the existing view_events code path with query_type "check_free_time"
+            # Extract query parameters using parse_view_event_query function from calendar_utils
+            query_params = parse_view_event_query(text)
+            
+            # Ensure query_type is set to check_free_time
+            query_params["query_type"] = "check_free_time"
+            
+            # Extract more specific free time query details
+            model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+            free_time_details_prompt = f"""
+            Analyze this free time query: "{text}"
+            
+            Extract the following information:
+            1. free_time_duration: What duration is the user looking for? (e.g., "hour", "30 minutes", "2 hours", "5 hrs", etc.)
+                - If asking for "free time" with no specific duration, use "any"
+                - If asking for "free hour" or similar, use "60 minutes"
+                - Extract the exact duration if mentioned, preserving the format (e.g., "5 hrs", "2 hours", "30 minutes")
+                - Be sure to capture variations like "hr", "hrs", or "hours"
+            2. time_period: When are they looking for free time? (e.g., "today", "this afternoon", "tomorrow morning", etc.)
+                - Use "today" if no specific time period is mentioned
+            3. specific_query: Categorize the query (e.g., "next free slot", "all free time", "specific time check")
+                - Use "next free slot" if they're asking for the next available time
+                - Use "all free time" if they're asking for all free slots
+                - Use "specific time check" if they're asking about availability at a specific time
+            
+            Return a JSON object with these fields.
+            """
+            
+            try:
+                free_time_response = model.generate_content(free_time_details_prompt)
+                free_time_text = free_time_response.text.strip()
+                
+                # Handle JSON formatting
+                if free_time_text.startswith("```json"):
+                    free_time_text = free_time_text[7:-3]
+                elif free_time_text.startswith("```"):
+                    free_time_text = free_time_text[3:-3]
+                
+                free_time_details = json.loads(free_time_text)
+                logger.info(f"Extracted free time query details: {free_time_details}")
+                
+                # Add extra debug info for duration
+                if "free_time_duration" in free_time_details:
+                    duration = free_time_details.get("free_time_duration")
+                    logger.info(f"DURATION DEBUG: Extracted duration value: '{duration}'")
+                
+                # Get more precise time range if specific period mentioned
+                time_period = free_time_details.get("time_period", "today")
+                if time_period != "today" and time_period not in query_params.get("date_range", ""):
+                    # Get a more specific date range based on the time period
+                    time_period_prompt = f"""
+                    Convert this time period: "{time_period}" to a date range in YYYY-MM-DD format.
+                    
+                    Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
+                    Current time: {datetime.datetime.now().strftime("%H:%M")}
+                    
+                    Examples:
+                    - "today" → "{datetime.datetime.now().strftime("%Y-%m-%d")}"
+                    - "tomorrow" → "{(datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")}"
+                    - "this week" → "{datetime.datetime.now().strftime("%Y-%m-%d")} to {(datetime.datetime.now() + datetime.timedelta(days=7-datetime.datetime.now().weekday())).strftime("%Y-%m-%d")}"
+                    
+                    If it's a specific part of a day (like "this afternoon"), just return the date with the time period noted.
+                    
+                    Return only the date or date range, nothing else.
+                    """
+                    
+                    time_period_response = model.generate_content(time_period_prompt)
+                    new_date_range = time_period_response.text.strip()
+                    if new_date_range:
+                        query_params["date_range"] = new_date_range
+                        logger.info(f"Updated date range based on time period: {new_date_range}")
+                
+                # Add the extracted details to query_params
+                query_params.update(free_time_details)
+            except Exception as e:
+                logger.error(f"Error extracting free time details: {e}")
+                # Continue with default parameters if extraction fails
+            
+            # Get calendar IDs based on preferences or specified calendar
+            calendar_ids = []
+            if query_params.get("calendar_name"):
+                calendar_id = get_calendar_id(query_params.get("calendar_name"))
+                calendar_ids = [calendar_id]
+            elif user_preferred_calendars:
+                calendar_ids = [cal['id'] for cal in user_preferred_calendars]
+            else:
+                calendar_ids = ["primary"]
+            
+            # Normalize date range
+            date_range = query_params.get("date_range", "")
+            if "to" in date_range:
+                start_date, end_date = date_range.split(" to ")
+            else:
+                start_date = end_date = date_range
+            
+            # Clean date_range if it contains time period words like "morning"
+            time_period_names = list(time_periods.keys())
+            for period in time_period_names:
+                if period in start_date:
+                    start_date = start_date.replace(f" {period}", "")
+                if period in end_date:
+                    end_date = end_date.replace(f" {period}", "")
+                    
+            # Update date_range with clean dates
+            if start_date == end_date:
+                date_range = start_date
+            else:
+                date_range = f"{start_date} to {end_date}"
+                
+            logger.info(f"Cleaned date range: {date_range}")
+            
+            # Adjust start and end times based on time period if needed
+            daily_start_time = start_time  # Default from config
+            daily_end_time = end_time      # Default from config
+            
+            time_period = query_params.get("time_period", "").lower()
+            if "morning" in time_period:
+                daily_start_time = time_periods["morning"]["start"]
+                daily_end_time = time_periods["morning"]["end"]
+            elif "afternoon" in time_period:
+                daily_start_time = time_periods["afternoon"]["start"]
+                daily_end_time = time_periods["afternoon"]["end"]
+            elif "evening" in time_period:
+                daily_start_time = time_periods["evening"]["start"]
+                daily_end_time = time_periods["evening"]["end"]
+            elif "night" in time_period:
+                daily_start_time = time_periods["night"]["start"]
+                daily_end_time = time_periods["night"]["end"]
+            
+            logger.info(f"Adjusted time window based on query: {daily_start_time} to {daily_end_time}")
+            
+            # Leverage existing find_time_helper function to get free slots
+            free_time_result = find_time_helper(
+                date_range=date_range,
+                start_time=daily_start_time,
+                end_time=daily_end_time,
+                calendarIds=calendar_ids
+            )
+            
+            response_data = {
+                "success": True,
+                "intent": "check_free_time",
+                "query_type": "check_free_time",
+                "date_range": date_range,
+                "free_slots": free_time_result.get("free_slots", []),
+                "total_free_slots": free_time_result.get("total_free_slots", 0),
+                "free_time_duration": query_params.get("free_time_duration", "any"),
+                "time_period": query_params.get("time_period", "today"),
+                "specific_query": query_params.get("specific_query", "next free slot")
+            }
+            
+            # Log the free time duration for debugging
+            logger.info(f"DURATION DEBUG: Duration value passed to response: '{response_data.get('free_time_duration')}'")
+            
+            # Generate a humanized response
+            humanized_response = generate_humanized_view_response(response_data)
+            response_data["humanizedResponse"] = humanized_response
+            
+            return jsonify(response_data)
         
         elif intent == "View events":
             # Extract query parameters using Gemini
@@ -1317,6 +1476,42 @@ def process_natural_language():
                 
                 time_min = f"{start_date}T00:00:00-07:00"
                 time_max = f"{end_date}T23:59:59-07:00"
+                
+                # Clean date_range if it contains time period words like "morning"
+                time_period_names = list(time_periods.keys())
+                for period in time_period_names:
+                    if period in start_date:
+                        start_date = start_date.replace(f" {period}", "")
+                    if period in end_date:
+                        end_date = end_date.replace(f" {period}", "")
+                        
+                # Update date_range with clean dates
+                if start_date == end_date:
+                    date_range = start_date
+                else:
+                    date_range = f"{start_date} to {end_date}"
+                    
+                logger.info(f"Cleaned date range: {date_range}")
+                
+                # Adjust start and end times based on time period if needed
+                daily_start_time = start_time  # Default from config
+                daily_end_time = end_time      # Default from config
+                
+                time_period = query_params.get("time_period", "").lower()
+                if "morning" in time_period:
+                    daily_start_time = time_periods["morning"]["start"]
+                    daily_end_time = time_periods["morning"]["end"]
+                elif "afternoon" in time_period:
+                    daily_start_time = time_periods["afternoon"]["start"]
+                    daily_end_time = time_periods["afternoon"]["end"]
+                elif "evening" in time_period:
+                    daily_start_time = time_periods["evening"]["start"]
+                    daily_end_time = time_periods["evening"]["end"]
+                elif "night" in time_period:
+                    daily_start_time = time_periods["night"]["start"]
+                    daily_end_time = time_periods["night"]["end"]
+                
+                logger.info(f"Adjusted time window based on query: {daily_start_time} to {daily_end_time}")
                 
                 # Process based on query type
                 query_type = query_params.get("query_type", "list_events")

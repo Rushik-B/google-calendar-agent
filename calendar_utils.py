@@ -9,9 +9,10 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import re
 
 # Import user preferences from config file
-from config import timezone_str, timezone
+from config import timezone_str, timezone, time_periods, deadline_thresholds
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, 
@@ -185,26 +186,159 @@ def generate_humanized_view_response(events_data):
             date_range = events_data.get("date_range", "")
             total_free_slots = events_data.get("total_free_slots", 0)
             
-            prompt = f"""
-            Generate a friendly, conversational response describing the user's free time slots.
+            # Parse requested duration (if any)
+            requested_duration_str = events_data.get("free_time_duration", "any")
+            required_duration_minutes = 60  # Default to 60 minutes (1 hour)
             
-            Date range queried: {date_range}
-            Total free time slots found: {total_free_slots}
+            logger.info(f"DURATION DEBUG: Raw free_time_duration value received: '{requested_duration_str}'")
             
-            Free slots:
-            {json.dumps(free_slots, indent=2)}
+            if requested_duration_str != "any" and requested_duration_str != "60 minutes":
+                try:
+                    # Try to parse duration like "5 hours" or "30 minutes"
+                    if "hour" in requested_duration_str or "hr" in requested_duration_str:
+                        # Extract the numeric part (handle cases like "5 hours", "5 hrs", "5hr", etc.)
+                        hours_match = re.search(r'(\d+(\.\d+)?)\s*(hour|hr|hrs)', requested_duration_str)
+                        if hours_match:
+                            hours = float(hours_match.group(1))
+                            required_duration_minutes = int(hours * 60)
+                            logger.info(f"Parsed {hours} hours from '{requested_duration_str}', converted to {required_duration_minutes} minutes")
+                    elif "minute" in requested_duration_str:
+                        minutes_match = re.search(r'(\d+)\s*minute', requested_duration_str)
+                        if minutes_match:
+                            required_duration_minutes = int(minutes_match.group(1))
+                    
+                    logger.info(f"Filtering for slots with at least {required_duration_minutes} minutes duration")
+                except Exception as e:
+                    logger.error(f"Error parsing duration '{requested_duration_str}': {e}")
             
-            Instructions:
-            1. If there are no free slots, mention that their schedule is fully booked.
-            2. If there are free slots, summarize them concisely by mentioning key time slots.
-            3. Keep your response brief and conversational.
-            4. Do not use bullet points or formatting.
-            5. Do not introduce yourself or add pleasantries like "Here's what I found".
-            6. Use a friendly, helpful tone.
-            7. Include every day that has been checked for free slots.
+            # Filter slots based on required duration
+            matching_slots = []
+            shorter_slots = []
             
-            Response:
-            """
+            for slot in free_slots:
+                duration_minutes = slot.get("duration_minutes", 0)
+                if duration_minutes >= required_duration_minutes:
+                    matching_slots.append(slot)
+                elif duration_minutes >= 15:  # Only include reasonable gaps (15+ minutes)
+                    shorter_slots.append(slot)
+            
+            # Don't use Gemini model for this response - directly use our custom format with buttons
+            if matching_slots:
+                next_slot = matching_slots[0]
+                start_time = next_slot.get("start_time", "")
+                end_time = next_slot.get("end_time", "")
+                
+                # Convert to 12-hour format
+                try:
+                    start_dt = datetime.datetime.strptime(start_time, "%H:%M")
+                    end_dt = datetime.datetime.strptime(end_time, "%H:%M")
+                    start_formatted = start_dt.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+                    end_formatted = end_dt.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+                    
+                    # Format duration for display
+                    duration_minutes = next_slot.get("duration_minutes", 0)
+                    hours = duration_minutes // 60
+                    minutes = duration_minutes % 60
+                    duration_text = f"{hours} hour" + ("s" if hours != 1 else "")
+                    if minutes > 0:
+                        duration_text += f" {minutes} minute" + ("s" if minutes != 1 else "")
+                    
+                    # Get the date information
+                    date_str = next_slot.get("day", "")
+                    if date_str:
+                        date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                        today = datetime.datetime.now().date()
+                        tomorrow = today + datetime.timedelta(days=1)
+                        
+                        if date_obj == today:
+                            date_display = "today"
+                        elif date_obj == tomorrow:
+                            date_display = "tomorrow"
+                        else:
+                            date_display = date_obj.strftime("%A, %B %d")  # e.g. "Monday, March 27"
+                    else:
+                        date_display = ""
+                    
+                    # Create response with action buttons
+                    free_slot_html = f"""
+                    <div class="free-time-card">
+                        <p>Looks like you have a nice chunk of time available {date_display} from <span class="time-slot">{start_formatted} – {end_formatted}</span>! That's a solid <b>{duration_text}</b>.</p>
+                        <div class="free-time-actions">
+                            <button class="action-button" onclick="showDurationSelector('{start_time}', '{end_time}', 'duration-selector-{start_time.replace(":", "")}', 'duration-display-{start_time.replace(":", "")}', 'duration-slider-{start_time.replace(":", "")}')">Schedule a break</button>
+                            <button class="action-button" onclick="scheduleTask('{start_time}', '{end_time}')">Schedule a task</button>
+                        </div>
+                        <div id="duration-selector-{start_time.replace(':', '')}" class="duration-selector" style="display:none; margin-top: 15px;">
+                            <p>Select break duration: <span id="duration-display-{start_time.replace(':', '')}">60 min</span></p>
+                            <input type="range" id="duration-slider-{start_time.replace(':', '')}" min="15" max="{duration_minutes}" value="60" step="15" 
+                                   oninput="updateDurationDisplay(this.value, 'duration-display-{start_time.replace(':', '')}')">
+                            <div style="display: flex; justify-content: space-between; margin-top: 5px;">
+                                <button class="action-button" onclick="scheduleBreakWithDuration('{start_time}', '{end_time}', 'duration-slider-{start_time.replace(':', '')}')">Confirm</button>
+                                <button class="action-button secondary" onclick="cancelDurationSelection('duration-selector-{start_time.replace(':', '')}')">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                    """
+                    logger.debug(f"Generated free slot HTML: {free_slot_html}")
+                    return free_slot_html
+                except Exception as e:
+                    logger.error(f"Error formatting free time response: {e}")
+                    # Simplified fallback without buttons
+                    return f"You have a free chunk of time from {start_time} to {end_time} in the requested time period."
+            elif shorter_slots and required_duration_minutes > 60:
+                # We have shorter slots but not long enough for the requested duration
+                return f"<div class='free-time-card'>You don't have any {requested_duration_str} long free slots in the requested time period.</div>"
+            elif shorter_slots:
+                try:
+                    # Get the date of the first shorter slot to determine if it's today, tomorrow, etc.
+                    first_slot = shorter_slots[0]
+                    date_str = first_slot.get("day", "")
+                    date_display = ""
+                    
+                    if date_str:
+                        date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                        today = datetime.datetime.now().date()
+                        tomorrow = today + datetime.timedelta(days=1)
+                        
+                        if date_obj == today:
+                            date_display = "today"
+                        elif date_obj == tomorrow:
+                            date_display = "tomorrow"
+                        else:
+                            date_display = date_obj.strftime("%A, %B %d")  # e.g. "Monday, March 27"
+                    
+                    response = f"<div class='free-time-card'><b>You don't have a full free hour {date_display}, but here are some available gaps:</b><br><br>"
+                    
+                    # Display top 3 shorter slots
+                    for i, slot in enumerate(shorter_slots[:3]):
+                        start_time = slot.get("start_time", "")
+                        end_time = slot.get("end_time", "")
+                        duration = slot.get("duration_minutes", 0)
+                        
+                        try:
+                            start_dt = datetime.datetime.strptime(start_time, "%H:%M")
+                            end_dt = datetime.datetime.strptime(end_time, "%H:%M")
+                            start_formatted = start_dt.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+                            end_formatted = end_dt.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+                            
+                            # Add button for each slot
+                            response += f"""
+                            <div class="slot-item">
+                                <span class="time-slot">{start_formatted} – {end_formatted}</span> ({duration} min)
+                                <div class="free-time-actions">
+                                    <button class="action-button small" onclick="scheduleTask('{start_time}', '{end_time}')">Schedule</button>
+                                </div>
+                            </div>
+                            """
+                        except:
+                            response += f"{start_time} – {end_time} ({duration} min)<br>"
+                    
+                    response += "</div>"
+                    return response
+                except Exception as e:
+                    logger.error(f"Error formatting shorter slots: {e}")
+                    return "<b>You don't have a full free hour in the requested time period, but you do have some shorter gaps.</b>"
+            else:
+                return "<div class='free-time-card'>Your calendar is fully booked for the requested time period.</div>"
         elif events_data.get("query_type") in ["event_duration", "event_details"]:
             matching_events = events_data.get("matching_events", [])
             event_name = events_data.get("event_name", "")
@@ -257,7 +391,99 @@ def generate_humanized_view_response(events_data):
             date_range = events_data.get("date_range", "today")
             return f"You have {total_events} events scheduled for {date_range}."
         elif events_data.get("query_type") == "check_free_time":
-            return f"I found some free time in your schedule."
+            free_slots = events_data.get("free_slots", [])
+            
+            # Simple fallback that doesn't use the model
+            if not free_slots:
+                return "<div class='free-time-card'>Your calendar is fully booked for the requested time period.</div>"
+            
+            # Parse requested duration (if any)
+            requested_duration_str = events_data.get("free_time_duration", "any")
+            required_duration_minutes = 60  # Default to 60 minutes (1 hour)
+            
+            if requested_duration_str != "any" and requested_duration_str != "60 minutes":
+                try:
+                    # Try to parse duration like "5 hours" or "30 minutes"
+                    if "hour" in requested_duration_str or "hr" in requested_duration_str:
+                        # Extract the numeric part (handle cases like "5 hours", "5 hrs", "5hr", etc.)
+                        hours_match = re.search(r'(\d+(\.\d+)?)\s*(hour|hr|hrs)', requested_duration_str)
+                        if hours_match:
+                            hours = float(hours_match.group(1))
+                            required_duration_minutes = int(hours * 60)
+                            logger.info(f"Parsed {hours} hours from '{requested_duration_str}', converted to {required_duration_minutes} minutes")
+                    elif "minute" in requested_duration_str:
+                        minutes_match = re.search(r'(\d+)\s*minute', requested_duration_str)
+                        if minutes_match:
+                            required_duration_minutes = int(minutes_match.group(1))
+                except Exception:
+                    pass  # Use default 60 minutes
+            
+            # Find slots with the required duration
+            matching_slots = [slot for slot in free_slots if slot.get("duration_minutes", 0) >= required_duration_minutes]
+            
+            if matching_slots:
+                next_slot = matching_slots[0]
+                start_time = next_slot.get("start_time", "")
+                end_time = next_slot.get("end_time", "")
+                
+                # Convert to 12-hour format
+                try:
+                    start_dt = datetime.datetime.strptime(start_time, "%H:%M")
+                    end_dt = datetime.datetime.strptime(end_time, "%H:%M")
+                    start_formatted = start_dt.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+                    end_formatted = end_dt.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+                    
+                    # Format duration for display
+                    duration_minutes = next_slot.get("duration_minutes", 0)
+                    hours = duration_minutes // 60
+                    minutes = duration_minutes % 60
+                    duration_text = f"{hours} hour" + ("s" if hours != 1 else "")
+                    if minutes > 0:
+                        duration_text += f" {minutes} minute" + ("s" if minutes != 1 else "")
+                    
+                    # Get the date information
+                    date_str = next_slot.get("day", "")
+                    if date_str:
+                        date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                        today = datetime.datetime.now().date()
+                        tomorrow = today + datetime.timedelta(days=1)
+                        
+                        if date_obj == today:
+                            date_display = "today"
+                        elif date_obj == tomorrow:
+                            date_display = "tomorrow"
+                        else:
+                            date_display = date_obj.strftime("%A, %B %d")  # e.g. "Monday, March 27"
+                    else:
+                        date_display = ""
+                    
+                    # Create response with action buttons
+                    response_html = f"""
+                    <div class="free-time-card">
+                        <p>You have a free chunk of time {date_display} from <span class="time-slot">{start_formatted} – {end_formatted}</span>. That's {duration_text}.</p>
+                        <div class="free-time-actions">
+                            <button class="action-button" onclick="showDurationSelector('{start_time}', '{end_time}', 'duration-selector-{start_time.replace(":", "")}', 'duration-display-{start_time.replace(":", "")}', 'duration-slider-{start_time.replace(":", "")}')">Schedule a break</button>
+                            <button class="action-button" onclick="scheduleTask('{start_time}', '{end_time}')">Schedule a task</button>
+                        </div>
+                        <div id="duration-selector-{start_time.replace(':', '')}" class="duration-selector" style="display:none; margin-top: 15px;">
+                            <p>Select break duration: <span id="duration-display-{start_time.replace(':', '')}">60 min</span></p>
+                            <input type="range" id="duration-slider-{start_time.replace(':', '')}" min="15" max="{duration_minutes}" value="60" step="15" 
+                                   oninput="updateDurationDisplay(this.value, 'duration-display-{start_time.replace(':', '')}')">
+                            <div style="display: flex; justify-content: space-between; margin-top: 5px;">
+                                <button class="action-button" onclick="scheduleBreakWithDuration('{start_time}', '{end_time}', 'duration-slider-{start_time.replace(':', '')}')">Confirm</button>
+                                <button class="action-button secondary" onclick="cancelDurationSelection('duration-selector-{start_time.replace(':', '')}')">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                    """
+                    logger.debug(f"Generated fallback free slot HTML: {response_html}")
+                    return response_html
+                except:
+                    return f"You have a free chunk of time from {start_time} to {end_time} in the requested time period."
+            elif required_duration_minutes > 60:
+                return f"<div class='free-time-card'>You don't have any {requested_duration_str} long free slots in the requested time period.</div>"
+            else:
+                return "<div class='free-time-card'>You don't have any hour-long free slots in the requested time period.</div>"
         elif events_data.get("query_type") in ["event_duration", "event_details"]:
             event_name = events_data.get("event_name", "")
             matching_count = len(events_data.get("matching_events", []))
@@ -320,10 +546,10 @@ def extract_time_from_query(natural_language):
         1. Look for time references like "2 PM", "3:30", "afternoon", etc.
         2. Return the time in 24-hour format (HH:MM)
         3. For general time periods, use these defaults:
-           - "morning" → "09:00"
-           - "afternoon" → "14:00"
-           - "evening" → "18:00"
-           - "night" → "20:00"
+           - "morning" → "{time_periods['morning']['default_time']}"
+           - "afternoon" → "{time_periods['afternoon']['default_time']}"
+           - "evening" → "{time_periods['evening']['default_time']}"
+           - "night" → "{time_periods['night']['default_time']}"
         4. If no specific time is mentioned, return "12:00"
         
         Return ONLY the time in HH:MM format, nothing else.

@@ -1,13 +1,5 @@
 [
   {
-    "backgroundColor": "#cca6ac",
-    "colorId": "21",
-    "description": "",
-    "id": "rushikbusiness@gmail.com",
-    "primary": true,
-    "summary": "Home"
-  },
-  {
     "backgroundColor": "#9fc6e7",
     "colorId": "15",
     "description": "",
@@ -46,5 +38,13 @@
     "id": "f73467aaf0fe39410e76ead78bb938e1414e839b3811cbc152d5644d11be929f@group.calendar.google.com",
     "primary": false,
     "summary": "Work"
+  },
+  {
+    "backgroundColor": "#cca6ac",
+    "colorId": "21",
+    "description": "",
+    "id": "rushikbusiness@gmail.com",
+    "primary": true,
+    "summary": "Home"
   }
 ]

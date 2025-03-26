@@ -6,6 +6,45 @@ import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
 import interactionPlugin from '@fullcalendar/interaction';
 
+// Define the script at global level to ensure the functions are globally accessible
+const setupGlobalFunctions = () => {
+  if (typeof window !== 'undefined') {
+    // Create a custom event for scheduling breaks
+    window.scheduleBreak = (startTime, endTime) => {
+      console.log("scheduleBreak called with:", startTime, endTime);
+      // Dispatch a custom event that the React component can listen for
+      window.dispatchEvent(
+        new CustomEvent('scheduleCalendarItem', {
+          detail: {
+            type: 'break',
+            startTime,
+            endTime
+          }
+        })
+      );
+    };
+    
+    // Create a custom event for scheduling tasks  
+    window.scheduleTask = (startTime, endTime) => {
+      console.log("scheduleTask called with:", startTime, endTime);
+      window.dispatchEvent(
+        new CustomEvent('scheduleCalendarItem', {
+          detail: {
+            type: 'task',
+            startTime,
+            endTime
+          }
+        })
+      );
+    };
+    
+    // Log to verify functions are attached
+    console.log("Global scheduling functions attached:", 
+      typeof window.scheduleBreak === 'function', 
+      typeof window.scheduleTask === 'function');
+  }
+};
+
 function NaturalLanguageForm() {
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -18,12 +57,151 @@ function NaturalLanguageForm() {
   const [showCalendar, setShowCalendar] = useState(false);
   const [eventDetails, setEventDetails] = useState({});
   const [selectedSlots, setSelectedSlots] = useState([]);
+  
+  // Call the setup function on load
+  useEffect(() => {
+    setupGlobalFunctions();
+  }, []);
+  
   const [calendars, setCalendars] = useState([]);
   const [selectedCalendars, setSelectedCalendars] = useState([]);
   const [dateRange, setDateRange] = useState({
     start: new Date(),
     end: new Date(new Date().setDate(new Date().getDate() + 7))
   });
+
+  // Define handleSubmit with useCallback before it's used in handleScheduleItem
+  const handleSubmit = useCallback(async (e) => {
+    e.preventDefault();
+    console.log("handleSubmit called with text:", text);
+    if (!text.trim()) return;
+
+    setLoading(true);
+    setError("");
+    setMessage("");
+    setAvailableSlots([]);
+    setCalendarEvents([]);
+    setSelectedSlots([]);
+    setShowCalendar(false);
+
+    try {
+      console.log("Making API call with text:", text);
+      const response = await axios.post('http://127.0.0.1:5000/api/natural-language-event', {
+        text
+      });
+      console.log("API response:", response.data);
+
+      if (response.data.success) {
+        // Use humanizedResponse from backend if available
+        if (response.data.humanizedResponse) {
+          if (response.data.intent === "check_free_time") {
+            // For check_free_time intent, we need to render HTML
+            setMessage('');
+            // Use a timeout to ensure state updates don't conflict
+            setTimeout(() => {
+              const messageElement = document.querySelector('.success-message');
+              if (messageElement) {
+                messageElement.innerHTML = response.data.humanizedResponse;
+              } else {
+                // Fallback in case the element isn't found
+                setMessage(response.data.humanizedResponse);
+              }
+            }, 10);
+            setText("");
+          } else {
+            // For other intents, just set the text message
+            setMessage(response.data.humanizedResponse);
+          }
+        }
+        
+        if (response.data.intent === "find_time") {
+          setAvailableSlots(response.data.availableSlots);
+          setCalendarEvents(response.data.events || []);
+          setShowCalendar(true);
+          
+          // Check if we have the insufficientTime flag
+          if (response.data.insufficientTime) {
+            // eslint-disable-next-line no-unused-vars
+            const requestedHours = response.data.requestedHours;
+            // eslint-disable-next-line no-unused-vars
+            const foundHours = response.data.foundHours;
+            // Use the humanizedResponse for error message if available
+            setError(`INSUFFICIENT TIME: ${response.data.humanizedResponse || response.data.message} Select these slots or try a different timeframe.`);
+          } else if (!response.data.humanizedResponse) {
+            // Only set this default message if humanizedResponse wasn't already set
+            setMessage("Here are suggested time slots on your calendar. Click on slots to select/deselect them for scheduling.");
+          }
+          
+          setEventDetails({
+            summary: getEventSummaryFromText(text),
+            description: text,
+            calendarId: "primary"
+          });
+        } else if (response.data.intent === "view_events") {
+          // Just display the humanized response for view_events, no calendar needed
+          setText("");
+        } else if (response.data.intent === "Create event" && !response.data.humanizedResponse) {
+          // Fallback for create event if no humanizedResponse is available
+          setMessage(`Event created! ${response.data.eventLink ? `View it here: ${response.data.eventLink}` : ''}`);
+          setText("");
+        } else {
+          // For other intents or if we already set humanizedResponse
+          setText("");
+        }
+      } else {
+        setError(`Error: ${response.data.humanizedResponse || response.data.message}`);
+      }
+    } catch (error) {
+      setError(`Error: ${error.response?.data?.message || error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [text, setLoading, setError, setMessage, setAvailableSlots, setCalendarEvents, 
+      setSelectedSlots, setShowCalendar, setText, setEventDetails]);
+
+  // Event handler for scheduling items - using useCallback to avoid dependency issues
+  const handleScheduleItem = useCallback((event) => {
+    console.log("Custom event received:", event.detail);
+    const { type, startTime, endTime } = event.detail;
+    const startDate = new Date();
+    const formattedDate = startDate.toLocaleDateString('en-US', { 
+      month: 'long', 
+      day: 'numeric',
+      year: 'numeric'
+    });
+    
+    if (type === 'break') {
+      const newText = `Schedule a break on ${formattedDate} from ${startTime} to ${endTime}`;
+      console.log("Setting text for break:", newText);
+      setText(newText);
+      // Submit after React has updated the state
+      setTimeout(() => {
+        handleSubmit({ preventDefault: () => {} });
+      }, 50);
+    } else if (type === 'task') {
+      // Show prompt for task name
+      const taskName = prompt("What would you like to name this task?", "Work Session");
+      if (taskName) {
+        const newText = `Schedule ${taskName} on ${formattedDate} from ${startTime} to ${endTime}`;
+        console.log("Setting text for task:", newText);
+        setText(newText);
+        // Submit after React has updated the state
+        setTimeout(() => {
+          handleSubmit({ preventDefault: () => {} });
+        }, 50);
+      }
+    }
+  }, [setText, handleSubmit]);
+  
+  // Set up event listeners
+  useEffect(() => {
+    window.addEventListener('scheduleCalendarItem', handleScheduleItem);
+    
+    // Clean up event listener
+    return () => {
+      window.removeEventListener('scheduleCalendarItem', handleScheduleItem);
+    };
+  }, [handleScheduleItem]);
 
   // Fetch all calendars and current preferences on mount
   useEffect(() => {
@@ -128,73 +306,6 @@ function NaturalLanguageForm() {
         return [...prev, cal];
       }
     });
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!text.trim()) return;
-
-    setLoading(true);
-    setError("");
-    setMessage("");
-    setAvailableSlots([]);
-    setCalendarEvents([]);
-    setSelectedSlots([]);
-    setShowCalendar(false);
-
-    try {
-      const response = await axios.post('http://127.0.0.1:5000/api/natural-language-event', {
-        text
-      });
-
-      if (response.data.success) {
-        // Use humanizedResponse from backend if available
-        if (response.data.humanizedResponse) {
-          setMessage(response.data.humanizedResponse);
-        }
-        
-        if (response.data.intent === "find_time") {
-          setAvailableSlots(response.data.availableSlots);
-          setCalendarEvents(response.data.calendarEvents);
-          setShowCalendar(true);
-          
-          // Check if we have the insufficientTime flag
-          if (response.data.insufficientTime) {
-            // eslint-disable-next-line no-unused-vars
-            const requestedHours = response.data.requestedHours;
-            // eslint-disable-next-line no-unused-vars
-            const foundHours = response.data.foundHours;
-            // Use the humanizedResponse for error message if available
-            setError(`INSUFFICIENT TIME: ${response.data.humanizedResponse || response.data.message} Select these slots or try a different timeframe.`);
-          } else if (!response.data.humanizedResponse) {
-            // Only set this default message if humanizedResponse wasn't already set
-            setMessage("Here are suggested time slots on your calendar. Click on slots to select/deselect them for scheduling.");
-          }
-          
-          setEventDetails({
-            summary: getEventSummaryFromText(text),
-            description: text,
-            calendarId: "primary"
-          });
-        } else if (response.data.intent === "view_events") {
-          // Just display the humanized response for view_events, no calendar needed
-          setText("");
-        } else if (response.data.intent === "Create event" && !response.data.humanizedResponse) {
-          // Fallback for create event if no humanizedResponse is available
-          setMessage(`Event created! ${response.data.eventLink ? `View it here: ${response.data.eventLink}` : ''}`);
-          setText("");
-        } else {
-          // For other intents or if we already set humanizedResponse
-          setText("");
-        }
-      } else {
-        setError(`Error: ${response.data.humanizedResponse || response.data.message}`);
-      }
-    } catch (error) {
-      setError(`Error: ${error.response?.data?.message || error.message}`);
-    } finally {
-      setLoading(false);
-    }
   };
 
   const getEventSummaryFromText = (text) => {
@@ -353,7 +464,7 @@ function NaturalLanguageForm() {
       </div>
 
       {error && <div className="error-message">{error}</div>}
-      {message && <div className="success-message">{message}</div>}
+      {message && <div className="success-message" dangerouslySetInnerHTML={{ __html: message }} />}
 
       {!showCalendar ? (
         <form onSubmit={handleSubmit}>
@@ -469,6 +580,196 @@ function renderEventContent(eventInfo) {
 function App() {
   return (
     <div className="App">
+      <script dangerouslySetInnerHTML={{
+        __html: `
+          // Directly define functions in the global scope
+          window.scheduleBreak = function(startTime, endTime) {
+            console.log("DOM scheduleBreak called with:", startTime, endTime);
+            if (window.dispatchEvent) {
+              window.dispatchEvent(
+                new CustomEvent('scheduleCalendarItem', {
+                  detail: {
+                    type: 'break',
+                    startTime,
+                    endTime
+                  }
+                })
+              );
+            }
+          };
+          
+          window.scheduleTask = function(startTime, endTime) {
+            console.log("DOM scheduleTask called with:", startTime, endTime);
+            if (window.dispatchEvent) {
+              window.dispatchEvent(
+                new CustomEvent('scheduleCalendarItem', {
+                  detail: {
+                    type: 'task',
+                    startTime,
+                    endTime
+                  }
+                })
+              );
+            }
+          };
+          
+          // Duration selector functions
+          window.showDurationSelector = function(startTime, endTime, selectorId, displayId, sliderId) {
+            console.log("Showing duration selector", selectorId);
+            const durationSelector = document.getElementById(selectorId);
+            if (durationSelector) {
+              durationSelector.style.display = 'block';
+            } else {
+              console.error("Duration selector element not found:", selectorId);
+            }
+          };
+          
+          window.updateDurationDisplay = function(minutes, displayId) {
+            console.log("Updating duration display to", minutes, "for", displayId);
+            const durationDisplay = document.getElementById(displayId);
+            if (!durationDisplay) {
+              console.error("Duration display element not found:", displayId);
+              return;
+            }
+            
+            let display = "";
+            if (minutes >= 60) {
+              const hours = Math.floor(minutes / 60);
+              const remainingMinutes = minutes % 60;
+              display = hours + " hour" + (hours > 1 ? "s" : "");
+              if (remainingMinutes > 0) {
+                display += " " + remainingMinutes + " min";
+              }
+            } else {
+              display = minutes + " min";
+            }
+            durationDisplay.textContent = display;
+          };
+          
+          window.scheduleBreakWithDuration = function(startTime, endTime, sliderId) {
+            console.log("Scheduling break with duration using slider", sliderId);
+            const durationSlider = document.getElementById(sliderId);
+            if (!durationSlider) {
+              console.error("Duration slider not found:", sliderId);
+              return;
+            }
+            
+            const durationMinutes = durationSlider.value;
+            console.log("Duration selected:", durationMinutes);
+            
+            const startDateTime = new Date();
+            const [startHours, startMinutes] = startTime.split(':').map(Number);
+            startDateTime.setHours(startHours, startMinutes, 0);
+            
+            // Calculate end time based on selected duration
+            const endDateTime = new Date(startDateTime);
+            endDateTime.setMinutes(startDateTime.getMinutes() + parseInt(durationMinutes));
+            
+            const formattedEndTime = endDateTime.getHours().toString().padStart(2, '0') + ':' + 
+                                  endDateTime.getMinutes().toString().padStart(2, '0');
+            
+            console.log("Calculated end time:", formattedEndTime);
+            
+            // Call the existing scheduleBreak function
+            window.scheduleBreak(startTime, formattedEndTime);
+          };
+          
+          window.cancelDurationSelection = function(selectorId) {
+            console.log("Canceling duration selection for", selectorId);
+            const durationSelector = document.getElementById(selectorId);
+            if (durationSelector) {
+              durationSelector.style.display = 'none';
+            } else {
+              console.error("Duration selector element not found:", selectorId);
+            }
+          };
+          
+          console.log("Inline scheduling functions defined and attached to window object");
+        `
+      }} />
+      <style jsx="true">{`
+        .success-message {
+          white-space: pre-line;
+          line-height: 1.5;
+          padding: 15px;
+          border-radius: 8px;
+          background-color: #f5f5f5;
+          margin: 15px 0;
+        }
+        
+        .success-message b {
+          font-weight: 600;
+        }
+        
+        .time-slot {
+          font-weight: 500;
+          color: #1a73e8;
+        }
+        
+        .free-time-card {
+          background-color: #e8f5e9;
+          border-radius: 8px;
+          padding: 15px;
+          margin: 10px 0;
+        }
+        
+        .free-time-actions {
+          display: flex;
+          gap: 10px;
+          margin-top: 15px;
+        }
+        
+        .action-button {
+          background-color: #4caf50;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          padding: 8px 16px;
+          cursor: pointer;
+          font-size: 14px;
+          transition: background-color 0.3s;
+        }
+        
+        .action-button:hover {
+          background-color: #388e3c;
+        }
+        
+        .action-button.small {
+          padding: 4px 12px;
+          font-size: 12px;
+        }
+        
+        .slot-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 6px 10px;
+          margin: 8px 0;
+          background-color: #f0f8ff;
+          border-radius: 4px;
+        }
+        
+        .duration-selector {
+          background-color: #f9f9f9;
+          border-radius: 6px;
+          padding: 12px;
+          margin-top: 10px;
+          border: 1px solid #ddd;
+        }
+        
+        .duration-selector input[type="range"] {
+          width: 100%;
+          margin: 10px 0;
+        }
+        
+        .action-button.secondary {
+          background-color: #9e9e9e;
+        }
+        
+        .action-button.secondary:hover {
+          background-color: #757575;
+        }
+      `}</style>
       <NaturalLanguageForm />
       <hr />
     </div>
