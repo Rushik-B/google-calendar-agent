@@ -5,9 +5,16 @@ min_work_duration = "00:30"
 max_work_duration = "05:00"
 timezone_str = "America/Vancouver"
 timezone = tz.gettz(timezone_str)
-start_time = "07:00"
-end_time = "20:00"
+start_time = "10:00"
+end_time = "22:00"
 notification_methods = ["popup", "email"]
+
+# User preferences paragraph - collected during signup
+# This is used by the assistant to understand user's scheduling preferences
+preferences_paragraph = """
+I'm most productive in the mornings from 10 AM to 2 PM, so please prioritize focused work during this time. 
+I have lunch around 2 - 2:30 PM each day, so avoid scheduling anything then.
+"""
 
 # Standardized time period definitions
 # Time ranges for different parts of the day (start_time, end_time)

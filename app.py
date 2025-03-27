@@ -9,6 +9,7 @@ from dateutil.relativedelta import relativedelta
 from dateutil import tz
 import google.generativeai as genai
 from dotenv import load_dotenv
+import re
 
 # Import calendar utility functions
 from calendar_utils import (
@@ -21,11 +22,15 @@ from calendar_utils import (
     set_user_preferred_calendars,
     fetch_events,
     extract_time_from_query,
-    parse_view_event_query
+    parse_view_event_query,
+    parse_modify_event_query,
+    match_events_for_modification,
+    apply_event_modification,
+    generate_modification_response
 )
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, 
+logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger('googleapiclient').setLevel(logging.ERROR)
 logging.getLogger('google_auth_oauthlib').setLevel(logging.ERROR)
 logging.getLogger('google.auth').setLevel(logging.ERROR)
+# Suppress Werkzeug logs (Flask's development server)
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 # Global User Preferences
 PREF_FILE = "preferences.json"
@@ -55,7 +62,7 @@ def load_preferences():
 load_preferences()
 
 # Import user preferences from config file
-from config import min_work_duration, max_work_duration, timezone_str, timezone, start_time, end_time, notification_methods, time_periods, deadline_thresholds
+from config import min_work_duration, max_work_duration, timezone_str, timezone, start_time, end_time, notification_methods, time_periods, deadline_thresholds, preferences_paragraph
 
 # Load environment variables
 load_dotenv()
@@ -65,7 +72,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
 app = Flask(__name__)
-CORS(app)
+# Configure CORS to allow all origins and credentials
+CORS(app, resources={r"/api/*": {"origins": "*", "supports_credentials": True}})
 
 # Import the necessary Google API libraries after the app is initialized
 from google.auth.transport.requests import Request
@@ -84,6 +92,17 @@ from googleapiclient.errors import HttpError
 
 def parse_and_validate_inputs(date_range, start_time, end_time):
     """Parse and validate the date range and time inputs."""
+    # Handle None/null date_range by providing a default
+    if date_range is None:
+        # Default to a range from today to 3 months ahead 
+        # for queries like "final exam dates" that need to look into the future
+        today = datetime.datetime.now().date()
+        future_date = today + datetime.timedelta(days=90)  # 3 months ahead
+        start_date_str = today.strftime("%Y-%m-%d")
+        end_date_str = future_date.strftime("%Y-%m-%d")
+        date_range = f"{start_date_str} to {end_date_str}"
+        logger.info(f"Date range was None, defaulting to: {date_range}")
+    
     if " to " in date_range:
         start_date_str, end_date_str = date_range.split(" to ")
     else:
@@ -219,38 +238,40 @@ def find_time_helper(date_range, start_time="08:00", end_time="21:00", calendarI
 def get_user_intent(natural_language):
     try:
         model = genai.GenerativeModel(model_name="gemini-2.0-flash")
-        prompt = f"""
-        Your job is to understand the user's intent from the text I am about to give you.
-        The user is interacting with a calendar application which will allow the user to chat with their calendar, create events, delete events, 
-        view their events, find time in their calendar to schedule an event/ events, or simply check when they have free time.
-
-        The possible intents are:
-        1. Create event
-        2. Delete event
-        3. View events
-        4. Find time to schedule event/ events
-        5. Check free time
+        intent_prompt = f"""
+        Classify this calendar-related query: "{natural_language}"
         
-        Guidelines for classification:
-        - "Find time to schedule event/ events" should be used when the user wants to find time WITH THE PURPOSE of scheduling something.
-        - "Check free time" should be used when the user just wants to know when they're free WITHOUT explicitly mentioning scheduling something.
-        - For example, "When's my next free hour?" should be classified as "Check free time".
-        - "Find me time to work on my project" should be classified as "Find time to schedule event/ events".
+        Choose exactly one of the following intents:
+        1. "Create event" - adding events (e.g., "schedule a meeting", "add dentist appointment")
+        2. "View events" - viewing events already on calendar (e.g., "what's on my calendar", "show me my schedule")
+        3. "Find time to schedule events" - finding available time slots (e.g., "when can I", "find time")
+        4. "Check free time" - checking for free time periods (e.g., "am I free", "when do I have free time")
+        5. "Modify events" - changing, rescheduling, or cancelling events (e.g., "reschedule meeting", "cancel appointment")
         
-        return the intent as a string. The string should be one of the possible intents.
-        
-        Here is the text: "{natural_language}"  
+        Return ONLY one of the five labels above, with no additional text.
         """
-
-
-        logger.info(f"User's query: {natural_language}")
-
         
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        response = model.generate_content(intent_prompt)
+        intent = response.text.strip()
+        logger.info(f"Detected intent: {intent}")
+        
+        # Validate that the response is one of our expected intents
+        valid_intents = [
+            "Create event", 
+            "View events", 
+            "Find time to schedule events", 
+            "Check free time",
+            "Modify events"
+        ]
+        
+        if intent not in valid_intents:
+            logger.warning(f"Detected intent '{intent}' is not a valid intent, defaulting to 'View events'")
+            return "View events"
+            
+        return intent
     except Exception as e:
-        logger.error(f"Error getting user intent: {e}")
-        return "Other"
+        logger.error(f"Error detecting intent: {e}")
+        return "View events"  # Default to view events
 
 def find_time(natural_language, start_time=start_time, end_time=end_time, work_duration=min_work_duration):
     try:
@@ -304,19 +325,6 @@ def find_time(natural_language, start_time=start_time, end_time=end_time, work_d
         
         3. **"Am I free at 2 PM next Wednesday?"**
         - Return: The date of next Wednesday in YYYY-MM-DD format only
-
-        ## Date Extraction Rules:
-        - If the user is checking availability at a specific time, return ONLY the date without the time.
-        - If the user mentions a task that needs to be **completed by**, **done by**, **finished by**, or **due by/on** a specific date, ALWAYS return a range from today to that date.
-        - If the user mentions needing a certain number of hours to complete a task with a deadline, ALWAYS return a range from today to the deadline.
-        - If the user specifies a **single date** without a deadline context (e.g., "Find me time on Monday"), return **that date only**.  
-        - If a **date range** is explicitly given (e.g., "this week", "next month", "between Monday and Friday"), return the **start and end dates** of that period.  
-        - If **no date is mentioned**, assume the task is for **this week**, starting today.  
-
-        ## Deadline Detection:
-        - Look for phrases like "to be done by", "due by", "due on", "finish by", "complete by", "by [date]"
-        - When these phrases appear, it means the user needs time BEFORE that date, not ON that date only.
-        - Always return a date range from today to the deadline date in these cases.
 
         ## Output Format:  
         - **Single date**: `"YYYY-MM-DD"`  
@@ -788,6 +796,13 @@ def extract_event_details(natural_language):
                             next_day = date_obj + datetime.timedelta(days=1)
                             end_date = next_day.strftime("%Y-%m-%d")
                             logger.info(f"Detected overnight event: {event.get('summary')} - adjusted end date to {end_date}")
+                    else:
+                        # Make sure event_date is defined even if we don't have start and end times
+                        event_date = event.get('date')
+                        # If date is None, default to current date
+                        if event_date is None:
+                            event_date = datetime.datetime.now().strftime("%Y-%m-%d")
+                        end_date = event_date
                     
                     standardized_event = {
                         "summary": event.get("summary", "Untitled Event"),
@@ -795,14 +810,27 @@ def extract_event_details(natural_language):
                         "description": event.get("description", ""),
                         "calendarId": get_calendar_id(event.get("calendarName", "primary")), 
                         "duration": event.get("duration", "01:00"),
-                        "start": {
-                            "dateTime": f"{event_date}T{event.get('startTime')}:00",
-                            "timeZone": timezone_str
-                        },
-                        "end": {
-                            "dateTime": f"{end_date}T{event.get('endTime')}:00",
-                            "timeZone": timezone_str
-                        }
+                    }
+                    
+                    # Handle the case where startTime or endTime might be null
+                    if event.get('startTime') is None:
+                        # Default to noon if no start time provided
+                        event['startTime'] = "12:00"
+                        
+                    if event.get('endTime') is None:
+                        # Default to 1 hour after start time
+                        start_time_obj = datetime.datetime.strptime(event.get('startTime'), "%H:%M")
+                        end_time_obj = start_time_obj + datetime.timedelta(hours=1)
+                        event['endTime'] = end_time_obj.strftime("%H:%M")
+                    
+                    # Add start and end time to the event
+                    standardized_event["start"] = {
+                        "dateTime": f"{event_date}T{event.get('startTime')}:00",
+                        "timeZone": timezone_str
+                    }
+                    standardized_event["end"] = {
+                        "dateTime": f"{end_date}T{event.get('endTime')}:00",
+                        "timeZone": timezone_str
                     }
                     
                     if event.get("notifications") or event.get("notificationMethods"):
@@ -861,6 +889,13 @@ def extract_event_details(natural_language):
                         next_day = date_obj + datetime.timedelta(days=1)
                         end_date = next_day.strftime("%Y-%m-%d")
                         logger.info(f"Detected overnight event: {event_details.get('summary')} - adjusted end date to {end_date}")
+                else:
+                    # Make sure event_date is defined even if we don't have start and end times
+                    event_date = event_details.get('date')
+                    # If date is None, default to current date
+                    if event_date is None:
+                        event_date = datetime.datetime.now().strftime("%Y-%m-%d")
+                    end_date = event_date
                 
                 standardized_event = {
                     "summary": event_details.get("summary", "Untitled Event"),
@@ -868,14 +903,27 @@ def extract_event_details(natural_language):
                     "description": event_details.get("description", ""),
                     "calendarId": get_calendar_id(event_details.get("calendarName", "primary")),
                     "duration": event_details.get("duration", "01:00"),
-                    "start": {
-                        "dateTime": f"{event_date}T{event_details.get('startTime')}:00",
-                        "timeZone": timezone_str
-                    },
-                    "end": {
-                        "dateTime": f"{end_date}T{event_details.get('endTime')}:00",
-                        "timeZone": timezone_str
-                    }
+                }
+                
+                # Handle the case where startTime or endTime might be null
+                if event_details.get('startTime') is None:
+                    # Default to noon if no start time provided
+                    event_details['startTime'] = "12:00"
+                    
+                if event_details.get('endTime') is None:
+                    # Default to 1 hour after start time
+                    start_time_obj = datetime.datetime.strptime(event_details.get('startTime'), "%H:%M")
+                    end_time_obj = start_time_obj + datetime.timedelta(hours=1)
+                    event_details['endTime'] = end_time_obj.strftime("%H:%M")
+                
+                # Add start and end time to the event
+                standardized_event["start"] = {
+                    "dateTime": f"{event_date}T{event_details.get('startTime')}:00",
+                    "timeZone": timezone_str
+                }
+                standardized_event["end"] = {
+                    "dateTime": f"{end_date}T{event_details.get('endTime')}:00",
+                    "timeZone": timezone_str
                 }
                 
                 if event_details.get("notifications") or event_details.get("notificationMethods"):
@@ -896,8 +944,8 @@ def extract_event_details(natural_language):
                     rrule = f"RRULE:FREQ={event_details.get('recurrence')}"
                     if event_details.get("recurrenceCount"):
                         rrule += f";COUNT={event_details.get('recurrenceCount')}"
-                    if event.get("recurrence") == "WEEKLY" and event.get("recurrenceDays"):
-                        rrule += f";BYDAY={','.join(event.get('recurrenceDays'))}"
+                    if event_details.get("recurrence") == "WEEKLY" and event_details.get("recurrenceDays"):
+                        rrule += f";BYDAY={','.join(event_details.get('recurrenceDays'))}"
                     standardized_event["recurrence"] = [rrule]
                 
                 return standardized_event
@@ -1044,11 +1092,22 @@ def get_events():
         time_min = f"{start_date}T00:00:00-07:00"
         time_max = f"{end_date}T23:59:59-07:00"
         
+        # Check if calendars parameter is provided in the request
+        calendars_param = request.args.get('calendars', '')
+        
         calendar_ids = []
-        if user_preferred_calendars:
+        if calendars_param:
+            # If calendars are provided in the request, use them
+            calendar_ids = calendars_param.split(',')
+           
+        elif user_preferred_calendars:
+            # Otherwise use preferred calendars
             calendar_ids = [cal['id'] for cal in user_preferred_calendars]
+            logger.info(f"Using preferred calendars: {calendar_ids}")
         else:
+            # Fallback to primary
             calendar_ids = ["primary"]
+            logger.info("No calendars specified, using primary calendar")
         
         all_events = []
         for calendar_id in calendar_ids:
@@ -1061,20 +1120,54 @@ def get_events():
             ).execute()
             
             for event in events_result.get('items', []):
-                # Skip events without start/end time
-                if 'dateTime' not in event.get('start', {}) or 'dateTime' not in event.get('end', {}):
-                    continue
+                if 'dateTime' in event.get('start', {}) and 'dateTime' in event.get('end', {}):
+                    # Find the calendar details for this event
+                    calendar_info = next((cal for cal in user_preferred_calendars if cal['id'] == calendar_id), None)
                     
-                event_data = {
-                    'id': event.get('id'),
-                    'title': event.get('summary', 'Untitled Event'),
-                    'start': event.get('start').get('dateTime'),
-                    'end': event.get('end').get('dateTime'),
-                    'calendarId': calendar_id,
-                    'backgroundColor': '#' + str(int(get_color_from_calendar_id(calendar_id)) * 123456 % 0xFFFFFF).zfill(6),
-                    'existingEvent': True
-                }
-                all_events.append(event_data)
+                    # Get calendar name and color
+                    calendar_name = calendar_info['summary'] if calendar_info else 'Calendar'
+                    background_color = calendar_info.get('backgroundColor', '#4285f4') if calendar_info else '#4285f4'
+                    
+                    # Events with specific times
+                    all_events.append({
+                        'id': event.get('id'),
+                        'summary': event.get('summary', 'Untitled Event'),
+                        'title': event.get('summary', 'Untitled Event'),
+                        'description': event.get('description', ''),
+                        'location': event.get('location', ''),
+                        'start': event['start']['dateTime'],
+                        'end': event['end']['dateTime'],
+                        'calendarId': calendar_id,
+                        'calendarName': calendar_name,
+                        'backgroundColor': background_color,
+                        'borderColor': background_color,
+                        'textColor': '#ffffff',
+                        'isAllDay': False
+                    })
+                elif 'date' in event.get('start', {}) and 'date' in event.get('end', {}):
+                    # Find the calendar details for this event
+                    calendar_info = next((cal for cal in user_preferred_calendars if cal['id'] == calendar_id), None)
+                    
+                    # Get calendar name and color
+                    calendar_name = calendar_info['summary'] if calendar_info else 'Calendar'
+                    background_color = calendar_info.get('backgroundColor', '#4285f4') if calendar_info else '#4285f4'
+                    
+                    # All-day events
+                    all_events.append({
+                        'id': event.get('id'),
+                        'summary': event.get('summary', 'Untitled Event'),
+                        'title': event.get('summary', 'Untitled Event'),
+                        'description': event.get('description', ''),
+                        'location': event.get('location', ''),
+                        'start': event['start']['date'] + 'T00:00:00',
+                        'end': event['end']['date'] + 'T23:59:59',
+                        'calendarId': calendar_id,
+                        'calendarName': calendar_name,
+                        'backgroundColor': background_color,
+                        'borderColor': background_color,
+                        'textColor': '#ffffff',
+                        'isAllDay': True
+                    })
         
         return jsonify({
             "success": True,
@@ -1094,6 +1187,9 @@ def process_natural_language():
         service = build("calendar", "v3", credentials=creds)
         data = request.json
         text = data.get('text', '')
+        
+        # Add logging for the user's query
+        logger.info(f"User query: {text}")
         
         if not text:
             return jsonify({
@@ -1135,73 +1231,286 @@ def process_natural_language():
                     "humanizedResponse": f"Added '{event_details.get('summary', 'event')}' to your calendar."
                 })
         
-        elif intent == "Find time" or intent == "Find time to schedule event/ events":
-            # Extract a summary using basic text processing instead of calling Gemini again
+        elif intent == "Find time to schedule events":
+            # Step 1: Get all free time slots using find_time_helper
             try:
-                # Some simple rules to extract a potential event title
-                text_lower = text.lower()
-                custom_summary = "Suggested Time"
+                # Initialize the Gemini model
+                model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+                model.temperature = 0.25
                 
-                # Look for common patterns
-                for pattern in ["time to work on", "time for", "schedule time for", "find time for", 
-                               "time to finish", "time to complete", "time to prepare", 
-                               "when can i", "need to work on", "need time for"]:
-                    if pattern in text_lower:
-                        # Get the text after the pattern
-                        parts = text_lower.split(pattern, 1)
-                        if len(parts) > 1:
-                            # Extract the first few words after the pattern
-                            words = parts[1].strip().split()
-                            if words:
-                                # Take at most 5 words
-                                phrase = " ".join(words[:5])
-                                # Remove any trailing punctuation
-                                phrase = phrase.rstrip('.,:;!?')
-                                # Capitalize words
-                                custom_summary = " ".join(word.capitalize() for word in phrase.split())
-                                break
+                # Extract date range from the query
+                date_extraction_prompt = f"""
+                Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
+                Current time: {datetime.datetime.now().strftime("%H:%M")}  
+
+                Extract the relevant date or date range and time-of-day constraints from the following text: "{text}".  
+
+                ## Instructions:
+                - The user is requesting time to work on a task with a deadline or time period.
+                - IMPORTANT: When the user mentions a deadline or tasks "to be done by", "to be completed by", or "due by" a certain date, ALWAYS return a date range from today to that deadline.
+                - The goal is to find available time slots to work on the task BEFORE the deadline.
+                - If the user is asking about availability at a specific time (like "Am I free at 2 PM on Wednesday?"), return ONLY the DATE in YYYY-MM-DD format.
+
+                ## Examples:
+                1. **"Find me time to work on X on Monday."**  
+                - Return: The date of the next Monday.  
+
+                2. **"I have a project due on Friday and need to complete it by then."**  
+                - Return: "{datetime.datetime.now().strftime("%Y-%m-%d")} to [next Friday from {datetime.datetime.now().strftime("%Y-%m-%d")}]"
                 
-                # Ensure the summary isn't too long
-                if len(custom_summary) > 30:
-                    custom_summary = custom_summary[:27] + "..."
-            
-                    
-                logger.info(f"Extracted custom summary without AI: {custom_summary}")
-            except Exception as e:
-                logger.warning(f"Could not extract custom summary: {e}")
-                custom_summary = "Suggested Time"
-            
-            # The user can also explicitly provide a summary in the request
-            user_provided_summary = data.get('summary')
-            if user_provided_summary:
-                custom_summary = user_provided_summary
-            
-            # Find available time slots
-            available_slots_json = find_time(text)
-            
-            try:
-                available_slots = json.loads(available_slots_json)
+                3. **"Am I free at 2 PM next Wednesday?"**
+                - Return: The date of next Wednesday in YYYY-MM-DD format only
+
+                ## Output Format:  
+                - **Single date**: `"YYYY-MM-DD"`  
+                - **Date range**: `"YYYY-MM-DD to YYYY-MM-DD"`  
+                - Return **only the date or date range string**, nothing else.  
+                """
                 
-                # Handle error response
-                if isinstance(available_slots, dict) and available_slots.get("error"):
-                    error_message = available_slots.get("error")
-                    logger.error(f"Error finding available time: {error_message}")
+                date_response = model.generate_content(date_extraction_prompt)
+                date_range = date_response.text.strip()
+                
+                logger.info(f"Date range extracted: {date_range}")
+                
+                # Process date_range if it contains time information
+                processed_date_range = date_range
+                if ' to ' in date_range:
+                    parts = date_range.split(' to ')
+                    # Extract only the date portion if times are included
+                    if len(parts) == 2:
+                        start_parts = parts[0].split()
+                        end_parts = parts[1].split()
+                        # Check if we have date and time format
+                        if len(start_parts) > 1 and ':' in parts[0]:
+                            start_date = start_parts[0]
+                            end_date = end_parts[0] if len(end_parts) > 0 else start_date
+                            processed_date_range = f"{start_date} to {end_date}"
+                elif ' ' in date_range and ':' in date_range:
+                    # Handle single date with time
+                    processed_date_range = date_range.split()[0]
+                
+                # Get calendar IDs from user preferences
+                calendar_ids = [cal['id'] for cal in user_preferred_calendars] if user_preferred_calendars else ["primary"]
+                
+                # Step 1: Get all free time slots
+                all_free_slots = find_time_helper(processed_date_range, start_time, end_time, calendar_ids)
+                
+                if not all_free_slots.get('success', False):
                     return jsonify({
                         "success": False,
                         "intent": "find_time",
-                        "message": error_message,
-                        "humanizedResponse": f"I encountered a problem finding available time slots: {error_message}"
+                        "message": all_free_slots.get('message', 'Error finding available time slots'),
+                        "humanizedResponse": f"I encountered a problem finding available time slots: {all_free_slots.get('message', 'Unknown error')}"
                     }), 400
                 
-                if isinstance(available_slots, dict) and available_slots.get("insufficientTime"):
-                    # Handle the case where not enough time was found
-                    slots = available_slots.get("validatedSlots", [])
-                    requested_hours = available_slots.get("requestedHours", 0)
-                    found_hours = available_slots.get("foundHours", 0)
+                free_slots = all_free_slots.get('free_slots', [])
+                
+                if not free_slots:
+                    return jsonify({
+                        "success": True,
+                        "intent": "find_time",
+                        "message": "No free slots found in the specified date range",
+                        "humanizedResponse": "I couldn't find any free time slots in the specified date range. Consider checking a different time period.",
+                        "events": []
+                    })
+                
+                # Step 2: Get all events from the specified date range
+                creds = get_credentials()
+                service = build("calendar", "v3", credentials=creds)
+                
+                # Parse the date range to get time_min and time_max
+                range_parts = processed_date_range.split(' to ')
+                if len(range_parts) == 2:
+                    start_date_str, end_date_str = range_parts
+                    # Convert to datetime objects with timezone
+                    start_date = parse_and_validate_inputs(start_date_str, start_time, end_time)[0]
+                    end_date = parse_and_validate_inputs(end_date_str, start_time, end_time)[0]
+                    # Use normalize_date_time for consistent handling
+                    time_min = start_date.strftime("%Y-%m-%dT%H:%M:%S-07:00")
+                    time_max = (end_date + datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S-07:00")
+                else:
+                    # Single date case
+                    single_date = parse_and_validate_inputs(processed_date_range, start_time, end_time)[0]
+                    # Use normalize_date_time for consistent handling
+                    time_min = single_date.strftime("%Y-%m-%dT%H:%M:%S-07:00") 
+                    time_max = (single_date + datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S-07:00")
+                
+                logger.info(f"Fetching events from {time_min} to {time_max}")
+                
+                # Fetch all events within the date range from all preferred calendars
+                all_events = []
+                for calendar_id in calendar_ids:
+                    try:
+                        events_result = service.events().list(
+                            calendarId=calendar_id,
+                            timeMin=time_min,
+                            timeMax=time_max,
+                            singleEvents=True,
+                            orderBy='startTime'
+                        ).execute()
+                        
+                        events = events_result.get('items', [])
+                        for event in events:
+                            if 'summary' in event:
+                                start = event['start'].get('dateTime', event['start'].get('date'))
+                                end = event['end'].get('dateTime', event['end'].get('date'))
+                                calendar_name = calendar_id
+                                
+                                # Try to get the calendar name instead of ID
+                                try:
+                                    calendar_info = service.calendars().get(calendarId=calendar_id).execute()
+                                    calendar_name = calendar_info.get('summary', calendar_id)
+                                except:
+                                    pass
+                                
+                                all_events.append({
+                                    'summary': event.get('summary', 'Untitled'),
+                                    'start': start,
+                                    'end': end,
+                                    'location': event.get('location', ''),
+                                    'description': event.get('description', '')[:100] if event.get('description') else '',
+                                    'calendar': calendar_name
+                                })
+                    except Exception as e:
+                        logger.warning(f"Error fetching events from calendar {calendar_id}: {e}")
+                
+                # Step 3: Ask the LLM to act as a personal time management assistant
+                # Pass both the events and free slots to reduce hallucination
+                assistant_prompt = f"""
+                You are an intelligent personal time management assistant helping a user schedule their time effectively.
+
+                ## Current Context:
+                - Current date and time: {datetime.datetime.now().strftime("%Y-%m-%d")} at {datetime.datetime.now().strftime("%H:%M")}
+                - User's request: "{text}"
+                - Date range being considered: {processed_date_range}
+
+                ## User's Configuration:
+                - Minimum work duration: {min_work_duration} (HH:MM format)
+                - Maximum work duration: {max_work_duration} (HH:MM format)
+                - Default working hours: {start_time} to {end_time}
+
+                ## User's Personal Preferences:
+                {preferences_paragraph}
+
+                ## Available Free Time Slots:
+                {json.dumps(free_slots, indent=2)}
+
+                ## All Events in the Date Range:
+                {json.dumps(all_events, indent=2)}
+
+                ## Your Task:
+                Analyze the user's request and available free time to recommend the BEST time slots for their task.
+                
+                Consider the following factors:
+                1. The nature of the task mentioned in their request
+                2. Any time constraints or deadlines mentioned
+                3. Task duration (estimate if not explicitly stated)
+                4. Optimal time of day for the task type
+                5. Avoiding fragmentation of their schedule
+                6. Leaving at least 15 minutes breaks between activities
+                7. The user's existing events in the date range
+                8. Best practices for productivity and time management
+                9. The user's stated preferences for scheduling different types of activities
+                10. Respect any personal routines or protected times mentioned in the user's preferences
+
+                ## CRITICAL CONSTRAINTS:
+                - You MUST STRICTLY follow the user's min_work_duration and max_work_duration settings
+                - Minimum work duration: {min_work_duration} (must convert to minutes)
+                - Maximum work duration: {max_work_duration} (must convert to minutes)
+                - NEVER suggest time slots shorter than the minimum work duration
+                - NEVER suggest time slots longer than the maximum work duration
+                - NEVER suggest time slots outside of the available free slots provided
+                - NEVER suggest slots that are in the past
+                - NEVER create a new slot that does not exist in the free_slots array
+                - ONLY select from the exact free slots provided
+                - RESPECT the user's preferences for break times, protected times, and meal times
+                - Start scheduling from atleast 10 minutes from {datetime.datetime.now().strftime("%H:%M")}.
+
+                ## Expected Output Format:
+                Return a JSON object with:
+                1. "explanation": A brief explanation of your scheduling logic
+                2. "suggested_slots": An array of recommended time slots in this format:
+                   [
+                     {{
+                       "start": "2023-04-01T09:00:00-07:00",
+                       "end": "2023-04-01T11:00:00-07:00",
+                       "reason": "Brief reason why this slot is optimal"
+                     }},
+                     ...
+                   ]
+                3. "calendar_title": A concise, appropriate calendar event title based on the user's request
+
+                Note: You MUST verify that each slot you suggest is fully contained within the available free slots.
+                Do NOT add any new slots that don't exist in the free_slots array.
+                """
+                
+                # Step 3: Get LLM recommendations
+                assistant_response = model.generate_content(assistant_prompt)
+                assistant_text = assistant_response.text.strip()
+                
+                # Clean up JSON response
+                if assistant_text.startswith("```json"):
+                    assistant_text = assistant_text[7:-3]
+                elif assistant_text.startswith("```"):
+                    assistant_text = assistant_text[3:-3]
+                
+                try:
+                    assistant_recommendations = json.loads(assistant_text)
                     
-                    # Format the slots for the calendar
+                    # Step 4: Format the recommended slots for the calendar
+                    explanation = assistant_recommendations.get("explanation", "Here are some suggested time slots based on your request and availability.")
+                    suggested_slots = assistant_recommendations.get("suggested_slots", [])
+                    custom_summary = assistant_recommendations.get("calendar_title", "Suggested time slot")
+                    logger.info(f"Custom Title: {custom_summary}")
+                    
+                    # Convert min and max work durations to minutes for validation
+                    min_work_minutes = int(min_work_duration.split(':')[0]) * 60 + int(min_work_duration.split(':')[1])
+                    max_work_minutes = int(max_work_duration.split(':')[0]) * 60 + int(max_work_duration.split(':')[1])
+                    
+                    # Validate the suggested slots are within available free slots and respect min/max durations
+                    validated_slots = []
+                    for slot in suggested_slots:
+                        slot_start = dateutil_parse(slot.get("start"))
+                        slot_end = dateutil_parse(slot.get("end"))
+                        
+                        # Check if slot is in the future
+                        # Current time
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        # Create a buffer of 1 minute
+                        buffer = datetime.timedelta(minutes=1)
+
+                        # If the slot starts more than 1 minute in the past, skip it
+                        if slot_start < now - buffer:
+                            logger.warning(f"Skipping slot {slot['start']}-{slot['end']} as it's more than 1 minute in the past")
+                            continue
+                                                
+                        # Check duration constraints
+                        slot_duration_minutes = (slot_end - slot_start).total_seconds() / 60
+                        if slot_duration_minutes < min_work_minutes:
+                            logger.warning(f"Skipping slot {slot['start']}-{slot['end']} as it's shorter than minimum work duration ({min_work_minutes} minutes)")
+                            continue
+                        if slot_duration_minutes > max_work_minutes:
+                            logger.warning(f"Skipping slot {slot['start']}-{slot['end']} as it's longer than maximum work duration ({max_work_minutes} minutes)")
+                            continue
+                        
+                        # Check if the slot is within any of the free slots
+                        is_valid = False
+                        for free_slot in free_slots:
+                            free_start = dateutil_parse(free_slot.get("start"))
+                            free_end = dateutil_parse(free_slot.get("end"))
+                            
+                            if slot_start >= free_start and slot_end <= free_end:
+                                is_valid = True
+                                break
+                        
+                        if is_valid:
+                            validated_slots.append(slot)
+                        else:
+                            logger.warning(f"Skipping invalid slot {slot['start']}-{slot['end']} as it's not within free slots")
+                    
+                    # Format the validated slots for the calendar
                     formatted_slots = []
-                    for i, slot in enumerate(slots):
+                    for i, slot in enumerate(validated_slots):
                         formatted_slots.append({
                             "id": f"suggested-{i}",
                             "title": custom_summary,
@@ -1210,58 +1519,99 @@ def process_natural_language():
                             "backgroundColor": "#8bc34a",  # Light green
                             "borderColor": "#689f38",      # Darker green
                             "textColor": "#000",           # Black text
-                            "suggestedSlot": True         # Mark as a suggested slot
+                            "suggestedSlot": True,         # Mark as a suggested slot
+                            "reason": slot.get("reason", "")  # Include the reason if available
                         })
                     
-                    logger.info(f"Formatted insufficient slots for calendar: {formatted_slots}")
+                    # Check if we have any validated slots
+                    if not formatted_slots:
+                        return jsonify({
+                            "success": True,
+                            "intent": "find_time",
+                            "message": "No suitable time slots found",
+                            "humanizedResponse": "I couldn't find suitable time slots that match your requirements. Consider expanding your time range or adjusting your requirements.",
+                            "events": []
+                        })
+                    
+                    logger.info(f"Formatted slots for calendar: {formatted_slots}")
+                    
+                    # Get the recommended calendar
+                    predicted_calendar = predict_calendar_for_event(text, user_preferred_calendars)
+                    logger.info(f"Predicted calendar for event: {predicted_calendar}")
                     
                     return jsonify({
                         "success": True,
                         "intent": "find_time",
-                        "message": available_slots.get("message"),
-                        "humanizedResponse": available_slots.get("message"),
+                        "message": "Found available time slots",
                         "events": formatted_slots,
-                        "insufficientTime": True,
-                        "requestedHours": requested_hours,
-                        "foundHours": found_hours
+                        "explanation": explanation,
+                        "humanizedResponse": explanation,
+                        "calendar_title": custom_summary,
+                        "predicted_calendar": predicted_calendar
                     })
-                
-                # Format the slots for the calendar
-                formatted_slots = []
-                for i, slot in enumerate(available_slots):
-                    formatted_slots.append({
-                        "id": f"suggested-{i}",
-                        "title": custom_summary,
-                        "start": slot.get("start"),
-                        "end": slot.get("end"),
-                        "backgroundColor": "#8bc34a",  # Light green
-                        "borderColor": "#689f38",      # Darker green
-                        "textColor": "#000",           # Black text
-                        "suggestedSlot": True         # Mark as a suggested slot
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error parsing assistant response: {e}, response was: {assistant_text}")
+                    
+                    # Fallback to simply returning all free slots if LLM recommendation fails
+                    # Format all free slots for the calendar
+                    fallback_slots = []
+                    
+                    # Define a default title for fallback case
+                    default_summary = "Available time slot"
+                    
+                    # Get the recommended calendar for fallback case too
+                    predicted_calendar = predict_calendar_for_event(text, user_preferred_calendars)
+                    logger.info(f"Predicted calendar for event (fallback): {predicted_calendar}")
+                    
+                    for i, slot in enumerate(free_slots):
+                        # Skip slots that don't meet min/max duration requirements
+                        slot_start = dateutil_parse(slot.get("start"))
+                        slot_end = dateutil_parse(slot.get("end"))
+                        slot_duration_minutes = (slot_end - slot_start).total_seconds() / 60
+                        
+                        if slot_duration_minutes < min_work_minutes:
+                            continue
+                        if slot_duration_minutes > max_work_minutes:
+                            # For slots longer than max duration, truncate to max duration
+                            new_end = slot_start + datetime.timedelta(minutes=max_work_minutes)
+                            slot["end"] = new_end.isoformat()
+                        
+                        fallback_slots.append({
+                            "id": f"suggested-{i}",
+                            "title": default_summary,
+                            "start": slot.get("start"),
+                            "end": slot.get("end"),
+                            "backgroundColor": "#8bc34a",  # Light green
+                            "borderColor": "#689f38",      # Darker green
+                            "textColor": "#000",           # Black text
+                            "suggestedSlot": True         # Mark as a suggested slot
+                        })
+                    
+                    return jsonify({
+                        "success": True,
+                        "intent": "find_time",
+                        "message": "Showing filtered available time slots (recommendation failed)",
+                        "events": fallback_slots,
+                        "humanizedResponse": "I've found available time slots that match your minimum and maximum duration requirements.",
+                        "calendar_title": default_summary,
+                        "predicted_calendar": predicted_calendar
                     })
-                
-                logger.info(f"Formatted slots for calendar: {formatted_slots}")
-                
-                return jsonify({
-                    "success": True,
-                    "intent": "find_time",
-                    "message": "Found available time slots",
-                    "events": formatted_slots,
-                    "humanizedResponse": f"I've found some available time slots and added them to your calendar view."
-                })
-            except json.JSONDecodeError as e:
-                logger.error(f"Error parsing find_time response: {e}, response was: {available_slots_json}")
+                    
+            except Exception as e:
+                logger.error(f"Error in Find time intent: {e}")
                 return jsonify({
                     "success": False,
                     "intent": "find_time",
-                    "message": "Error parsing time slot data",
-                    "humanizedResponse": "I had trouble finding available time slots. Could you try rephrasing your request?"
-                }), 400
+                    "message": f"Error processing request: {str(e)}",
+                    "humanizedResponse": "I encountered an error while finding time slots. Please try again or rephrase your request."
+                }), 500
         
         elif intent == "Check free time":
             # Use the existing view_events code path with query_type "check_free_time"
             # Extract query parameters using parse_view_event_query function from calendar_utils
             query_params = parse_view_event_query(text)
+            logger.info(f"Query parameters: {query_params}")
             
             # Ensure query_type is set to check_free_time
             query_params["query_type"] = "check_free_time"
@@ -1430,8 +1780,9 @@ def process_natural_language():
             Extract calendar query parameters from this text: "{text}"
             
             Parse the following parameters:
-            1. query_type: The type of calendar query (options: "list_events", "check_free_time", "event_duration", "event_details")
-            2. date_range: The date or date range being queried (e.g., "today", "tomorrow", "this week", "2023-05-01", "2023-05-01 to 2023-05-07")
+            1. query_type: The type of calendar query (options: 
+            "list_events", "event_duration", "event_details")
+            2. date_range: The date or date range being queried (e.g., "today", "tomorrow", "this week", "2023-05-01", "2023-05-01 to 2023-05-07", next week, next month, next year, etc.)
             3. filters: Any filters for events (e.g., "meetings", "work", "personal", etc.)
             4. event_name: If asking about a specific event, its name.
             5. calendar_name: If specifying a calendar, its name
@@ -1439,6 +1790,10 @@ def process_natural_language():
             Return a JSON object with these fields. Normalize dates to YYYY-MM-DD format.
             For "today", use the current date. For "this week", use the current date to the end of the week.
             For "tomorrow", use tomorrow's date.
+            
+            Important date interpretations:
+            - For "this weekend", use the dates for the upcoming Saturday and Sunday.
+            - For "next weekend", use the dates for the Saturday and Sunday AFTER the upcoming weekend.
             
             Provide only the JSON output.
             """
@@ -1467,8 +1822,19 @@ def process_natural_language():
                 else:
                     calendar_ids = ["primary"]
                 
+                # Handle None/null date_range by providing a default
+                date_range = query_params.get("date_range")
+                if date_range is None:
+                    # Default to a range from today to 3 months ahead 
+                    # for queries like "final exam dates" that need to look into the future
+                    today = datetime.datetime.now().date()
+                    future_date = today + datetime.timedelta(days=90)  # 3 months ahead
+                    start_date_str = today.strftime("%Y-%m-%d")
+                    end_date_str = future_date.strftime("%Y-%m-%d")
+                    date_range = f"{start_date_str} to {end_date_str}"
+                    logger.info(f"Date range was None, defaulting to: {date_range}")
+                
                 # Normalize date range
-                date_range = query_params.get("date_range", "")
                 if "to" in date_range:
                     start_date, end_date = date_range.split(" to ")
                 else:
@@ -1534,14 +1900,95 @@ def process_natural_language():
                             # Apply filters if specified
                             if query_params.get("filters"):
                                 filtered_events = []
-                                filters = [f.lower() for f in query_params.get("filters").split(",")]
+                                # Handle filters whether it's a string that needs splitting or already a list
+                                filters = query_params.get("filters")
+                                if isinstance(filters, str):
+                                    filters = [f.lower() for f in filters.split(",")]
+                                else:
+                                    filters = [f.lower() for f in filters]
                                 
-                                for event in events:
-                                    event_summary = event.get('summary', '').lower()
-                                    event_description = event.get('description', '').lower()
+                                # Check if we're looking for deadlines or due dates
+                                deadline_related = any(keyword in filter_term for filter_term in filters 
+                                                      for keyword in ["deadline", "due", "assignment", "project", "homework"])
+                                
+                                if deadline_related and events:
+                                    # Use Gemini to find deadline-related events semantically
+                                    try:
+                                        model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+                                        
+                                        deadline_match_prompt = f"""
+                                        I'm looking for deadline-related events from a calendar between {date_range}.
+                                        
+                                        Here are the events from the calendar:
+                                        {json.dumps([{'summary': e.get('summary', 'Untitled Event'), 'id': e.get('id')} for e in events], indent=2)}
+                                        
+                                        Find all events that represent deadlines, due dates, assignments, or projects, considering:
+                                        1. The event might use different terminology (assignment due, project deadline, homework submission, etc.)
+                                        2. Events may have course codes like "CMPT 276" followed by terms like "due" or "assignment"
+                                        3. Due dates often include words like "due", "deadline", "assignment", "project", "submission"
+                                        4. Handle capitalization and spacing variations
+                                        
+                                        Return a JSON list with the IDs of matching deadline events:
+                                        [
+                                          {{"id": "event_id1", "relevance_score": 0.95}},
+                                          {{"id": "event_id2", "relevance_score": 0.82}},
+                                          ...
+                                        ]
+                                        
+                                        Only return a JSON array, no other text.
+                                        """
+                                        
+                                        logger.info(f"Sending deadline matching prompt to Gemini")
+                                        response = model.generate_content(deadline_match_prompt)
+                                        matches_text = response.text.strip()
+                                        
+                                        # Handle JSON formatting
+                                        if matches_text.startswith("```json"):
+                                            matches_text = matches_text[7:-3]
+                                        elif matches_text.startswith("```"):
+                                            matches_text = matches_text[3:-3]
+                                        
+                                        logger.info(f"Received deadline matches from Gemini: {matches_text}")
+                                        
+                                        matched_ids = []
+                                        try:
+                                            matches = json.loads(matches_text)
+                                            matched_ids = [match["id"] for match in matches]
+                                            
+                                            # Add matched events to filtered list
+                                            for event in events:
+                                                if event.get('id') in matched_ids:
+                                                    filtered_events.append(event)
+                                                    
+                                        except json.JSONDecodeError:
+                                            logger.error(f"Failed to parse Gemini deadline response: {matches_text}")
+                                            # Fall back to basic keyword matching if parsing fails
+                                            for event in events:
+                                                event_summary = event.get('summary', '').lower()
+                                                event_description = event.get('description', '').lower() if event.get('description') else ''
+                                                
+                                                if any(keyword in event_summary or keyword in event_description 
+                                                      for keyword in ["deadline", "due", "assignment", "project", "homework", "submission"]):
+                                                    filtered_events.append(event)
                                     
-                                    if any(filter_term in event_summary or filter_term in event_description for filter_term in filters):
-                                        filtered_events.append(event)
+                                    except Exception as e:
+                                        logger.error(f"Error with Gemini deadline matching: {e}")
+                                        # Fall back to basic keyword matching
+                                        for event in events:
+                                            event_summary = event.get('summary', '').lower()
+                                            event_description = event.get('description', '').lower() if event.get('description') else ''
+                                            
+                                            if any(keyword in event_summary or keyword in event_description 
+                                                  for keyword in ["deadline", "due", "assignment", "project", "homework", "submission"]):
+                                                filtered_events.append(event)
+                                else:
+                                    # Use traditional keyword filtering for non-deadline filters
+                                    for event in events:
+                                        event_summary = event.get('summary', '').lower()
+                                        event_description = event.get('description', '').lower() if event.get('description') else ''
+                                        
+                                        if any(filter_term in event_summary or filter_term in event_description for filter_term in filters):
+                                            filtered_events.append(event)
                                 
                                 events = filtered_events
                             
@@ -1590,28 +2037,6 @@ def process_natural_language():
                     
                     return jsonify(response_data)
                     
-                elif query_type == "check_free_time":
-                    # Leverage existing find_time_helper function to get free slots
-                    free_time_result = find_time_helper(
-                        date_range=date_range,
-                        calendarIds=calendar_ids
-                    )
-                    
-                    response_data = {
-                        "success": True,
-                        "intent": "view_events",
-                        "query_type": "check_free_time",
-                        "date_range": date_range,
-                        "free_slots": free_time_result.get("free_slots", []),
-                        "total_free_slots": free_time_result.get("total_free_slots", 0)
-                    }
-                    
-                    # Generate a humanized response
-                    humanized_response = generate_humanized_view_response(response_data)
-                    response_data["humanizedResponse"] = humanized_response
-                    
-                    return jsonify(response_data)
-                    
                 elif query_type == "event_duration" or query_type == "event_details":
                     # Fetch specific event details
                     event_name = query_params.get("event_name", "").lower()
@@ -1623,9 +2048,65 @@ def process_natural_language():
                             "humanizedResponse": "I couldn't find the event you're looking for. Could you specify the event name?"
                         }), 400
                     
-                    # Search for the specified event across calendars
-                    matching_events = []
+                    # Use Gemini to analyze the query and determine appropriate time range
+                    if start_date == end_date:
+                        model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+                        time_range_prompt = f"""
+                        I have a user query about this event or activity: "{event_name}"
+                        Today's date is {start_date}.
+                        
+                        Based on the nature of this query:
+                        1. Determine how many days into the future I should look for relevant events
+                        2. Consider the type of event (exam, assignment, meeting, social event, etc.)
+                        3. Consider typical planning horizons for different activities
+                        4. Avoid hardcoded decisions - analyze the context of the query
+                        
+                        Return a JSON object with:
+                        {{
+                          "days_to_look_ahead": [number of days],
+                          "reason": [brief explanation]
+                        }}
+                        
+                        Only return the JSON object, no other text.
+                        """
+                        
+                        try:
+                            logger.info(f"Sending time range prompt to Gemini for query: {event_name}")
+                            response = model.generate_content(time_range_prompt)
+                            time_range_text = response.text.strip()
+                            
+                            # Handle JSON formatting
+                            if time_range_text.startswith("```json"):
+                                time_range_text = time_range_text[7:-3]
+                            elif time_range_text.startswith("```"):
+                                time_range_text = time_range_text[3:-3]
+                            
+                            time_range_data = json.loads(time_range_text)
+                            days_ahead = time_range_data.get("days_to_look_ahead", 30)  # Default to 30 days if parsing fails
+                            reason = time_range_data.get("reason", "Based on query context")
+                            
+                            # Ensure reasonable limits
+                            days_ahead = max(1, min(180, days_ahead))  # Between 1 and 180 days
+                            
+                            # Update the end date based on Gemini's recommendation
+                            end_date = (datetime.datetime.strptime(start_date, "%Y-%m-%d") + 
+                                      datetime.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+                            time_max = f"{end_date}T23:59:59-07:00"
+                            date_range = f"{start_date} to {end_date}"
+                            logger.info(f"Gemini suggested date range for query '{event_name}': {date_range} ({days_ahead} days). Reason: {reason}")
+                            
+                        except Exception as e:
+                            logger.error(f"Error determining time range with Gemini: {e}")
+                            # Fall back to a reasonable default if Gemini fails
+                            days_ahead = 30  # Default lookup period
+                            end_date = (datetime.datetime.strptime(start_date, "%Y-%m-%d") + 
+                                      datetime.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+                            time_max = f"{end_date}T23:59:59-07:00"
+                            date_range = f"{start_date} to {end_date}"
+                            logger.info(f"Using default date range due to Gemini error: {date_range}")
                     
+                    # First, fetch all events for the date range as candidates
+                    all_events = []
                     for calendar_id in calendar_ids:
                         try:
                             events_result = service.events().list(
@@ -1637,31 +2118,189 @@ def process_natural_language():
                             ).execute()
                             
                             for event in events_result.get('items', []):
-                                event_summary = event.get('summary', '').lower()
-                                
-                                # Check if event name matches or contains the query
-                                if event_name in event_summary:
-                                    # Calculate event duration
-                                    if 'dateTime' in event.get('start', {}) and 'dateTime' in event.get('end', {}):
-                                        start_dt = dateutil_parse(event['start']['dateTime'])
-                                        end_dt = dateutil_parse(event['end']['dateTime'])
-                                        
-                                        duration_min = (end_dt - start_dt).total_seconds() / 60
-                                        hours, minutes = divmod(duration_min, 60)
-                                        
-                                        matching_events.append({
-                                            'id': event.get('id'),
-                                            'summary': event.get('summary', 'Untitled Event'),
-                                            'start': start_dt.strftime("%Y-%m-%d %H:%M"),
-                                            'end': end_dt.strftime("%Y-%m-%d %H:%M"),
-                                            'duration': f"{int(hours)}h {int(minutes)}m",
-                                            'duration_minutes': int(duration_min),
-                                            'location': event.get('location', ''),
-                                            'description': event.get('description', ''),
-                                            'calendarId': calendar_id
-                                        })
+                                if 'dateTime' in event.get('start', {}) and 'dateTime' in event.get('end', {}):
+                                    # Events with specific times
+                                    all_events.append({
+                                        'id': event.get('id'),
+                                        'summary': event.get('summary', 'Untitled Event'),
+                                        'description': event.get('description', ''),
+                                        'location': event.get('location', ''),
+                                        'start': event['start']['dateTime'],
+                                        'end': event['end']['dateTime'],
+                                        'calendarId': calendar_id,
+                                        'isAllDay': False
+                                    })
+                                elif 'date' in event.get('start', {}) and 'date' in event.get('end', {}):
+                                    # All-day events
+                                    all_events.append({
+                                        'id': event.get('id'),
+                                        'summary': event.get('summary', 'Untitled Event'),
+                                        'description': event.get('description', ''),
+                                        'location': event.get('location', ''),
+                                        'start': event['start']['date'] + 'T00:00:00',
+                                        'end': event['end']['date'] + 'T23:59:59',
+                                        'calendarId': calendar_id,
+                                        'isAllDay': True
+                                    })
                         except Exception as e:
                             logger.error(f"Error fetching events from calendar {calendar_id}: {e}")
+                    
+                    # If no events found, return early
+                    if not all_events:
+                        return jsonify({
+                            "success": True,
+                            "intent": "view_events",
+                            "query_type": query_type,
+                            "event_name": query_params.get("event_name"),
+                            "date_range": date_range,
+                            "matching_events": [],
+                            "total_matching_events": 0,
+                            "humanizedResponse": f"I couldn't find any events in your calendar for the date range {date_range}."
+                        })
+                    
+                    # Use Gemini to match events
+                    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+                    
+                    # Use Gemini to analyze the query type instead of hardcoded keyword matching
+                    query_analysis_prompt = f"""
+                    Analyze this calendar event query: "{event_name}"
+                    
+                    Determine what type of event the user is looking for.
+                    
+                    Return a JSON object with:
+                    {{
+                      "event_type": [one of: "assignment", "exam", "meeting", "class", "social", "other"],
+                      "course_code": [if applicable, otherwise null],
+                      "specific_keywords": [list of specific keywords that might appear in matching events]
+                    }}
+                    
+                    Only return the JSON object, no other text.
+                    """
+                    
+                    try:
+                        logger.info(f"Sending query analysis prompt to Gemini")
+                        response = model.generate_content(query_analysis_prompt)
+                        analysis_text = response.text.strip()
+                        
+                        # Handle JSON formatting
+                        if analysis_text.startswith("```json"):
+                            analysis_text = analysis_text[7:-3]
+                        elif analysis_text.startswith("```"):
+                            analysis_text = analysis_text[3:-3]
+                        
+                        query_analysis = json.loads(analysis_text)
+                        event_type = query_analysis.get("event_type", "other")
+                        course_code = query_analysis.get("course_code")
+                        specific_keywords = query_analysis.get("specific_keywords", [])
+                        
+                        logger.info(f"Gemini query analysis: event type={event_type}, course={course_code}, keywords={specific_keywords}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error analyzing query with Gemini: {e}")
+                        # Fall back to basic analysis if Gemini fails
+                        event_type = "other"
+                        
+                        # Remove all course code detection code
+                    
+                    event_match_prompt = f"""
+                    I have a user query asking about an event named: "{query_params.get("event_name")}"
+                    
+                    Here are events from their calendar between {date_range}:
+                    {json.dumps([{'summary': e['summary'], 'id': e['id'], 'calendarId': e.get('calendarId')} for e in all_events], indent=2)}
+                    
+                    Find all events that match the user's query, considering:
+                    1. The user might misspell words or use abbreviations
+                    2. The query might be a partial match of the full event name
+                    3. The query might refer to event categories like assignments, meetings, exams, etc.
+                    4. The query might include dates, times, locations, or other contextual information
+                    5. Consider semantic meaning rather than just exact text matches
+                    6. Focus only on events from the user's requested calendars, ignoring events from other calendars
+                    7. Prioritize exact and close matches over loosely related events
+                    
+                    Return a JSON list with the IDs of matching events, ranked by relevance:
+                    [
+                      {{"id": "event_id1", "relevance_score": 0.95}},
+                      {{"id": "event_id2", "relevance_score": 0.82}},
+                      ...
+                    ]
+                    
+                    Only return a JSON array, no other text.
+                    Only include highly relevant matches (relevance_score > 0.5).
+                    Do not include events that only have a tangential relationship to the query.
+                    """
+                    
+                    try:
+                        logger.info(f"Sending event matching prompt to Gemini")
+                        response = model.generate_content(event_match_prompt)
+                        matches_text = response.text.strip()
+                        
+                        # Handle JSON formatting
+                        if matches_text.startswith("```json"):
+                            matches_text = matches_text[7:-3]
+                        elif matches_text.startswith("```"):
+                            matches_text = matches_text[3:-3]
+                        
+                        logger.info(f"Received event matches from Gemini: {matches_text}")
+                        
+                        matched_ids = []
+                        try:
+                            matches = json.loads(matches_text)
+                            matched_ids = [match["id"] for match in matches]
+                        except json.JSONDecodeError:
+                            logger.error(f"Failed to parse Gemini response: {matches_text}")
+                            # Fall back to basic matching if parsing fails
+                            matched_ids = [e["id"] for e in all_events if event_name in e["summary"].lower()]
+                        
+                        # Format the matched events
+                        matching_events = []
+                        for event in all_events:
+                            if event["id"] in matched_ids:
+                                start_dt = dateutil_parse(event['start'])
+                                end_dt = dateutil_parse(event['end'])
+                                
+                                duration_min = (end_dt - start_dt).total_seconds() / 60
+                                hours, minutes = divmod(duration_min, 60)
+                                
+                                matching_events.append({
+                                    'id': event.get('id'),
+                                    'summary': event.get('summary', 'Untitled Event'),
+                                    'start': start_dt.strftime("%Y-%m-%d %H:%M"),
+                                    'end': end_dt.strftime("%Y-%m-%d %H:%M"),
+                                    'duration': f"{int(hours)}h {int(minutes)}m",
+                                    'duration_minutes': int(duration_min),
+                                    'location': event.get('location', ''),
+                                    'description': event.get('description', ''),
+                                    'calendarId': event.get('calendarId')
+                                })
+                        
+                    except Exception as e:
+                        logger.error(f"Error with Gemini event matching: {e}")
+                        # Fall back to basic matching if Gemini fails
+                        matching_events = []
+                        for event in all_events:
+                            event_summary = event.get('summary', '').lower()
+                            event_description = event.get('description', '').lower() if event.get('description') else ''
+                            
+                            # Simple fallback matching
+                            if event_name in event_summary or event_name in event_description:
+                                # Calculate event duration
+                                start_dt = dateutil_parse(event['start'])
+                                end_dt = dateutil_parse(event['end'])
+                                
+                                duration_min = (end_dt - start_dt).total_seconds() / 60
+                                hours, minutes = divmod(duration_min, 60)
+                                
+                                matching_events.append({
+                                    'id': event.get('id'),
+                                    'summary': event.get('summary', 'Untitled Event'),
+                                    'start': start_dt.strftime("%Y-%m-%d %H:%M"),
+                                    'end': end_dt.strftime("%Y-%m-%d %H:%M"),
+                                    'duration': f"{int(hours)}h {int(minutes)}m",
+                                    'duration_minutes': int(duration_min),
+                                    'location': event.get('location', ''),
+                                    'description': event.get('description', ''),
+                                    'calendarId': event.get('calendarId')
+                                })
                     
                     response_data = {
                         "success": True,
@@ -1673,9 +2312,13 @@ def process_natural_language():
                         "total_matching_events": len(matching_events)
                     }
                     
-                    # Generate a humanized response
-                    humanized_response = generate_humanized_view_response(response_data)
-                    response_data["humanizedResponse"] = humanized_response
+                    # If no matches found, add a helpful message
+                    if not matching_events:
+                        response_data["humanizedResponse"] = f"I couldn't find any events matching '{query_params.get('event_name')}' in your calendar. Try checking with a different name or check your calendar settings."
+                    else:
+                        # Generate a humanized response
+                        humanized_response = generate_humanized_view_response(response_data)
+                        response_data["humanizedResponse"] = humanized_response
                     
                     return jsonify(response_data)
                 
@@ -1693,6 +2336,112 @@ def process_natural_language():
                     "message": f"Failed to parse query parameters: {str(e)}",
                     "humanizedResponse": "I had trouble understanding your calendar query. Could you try rephrasing it?"
                 }), 500
+        
+        elif intent == "Modify events":
+            # Log the raw modification query
+            logger.info(f"Modification query: {text}")
+            
+            # Parse the modification query
+            query_params = parse_modify_event_query(text)
+            logger.info(f"Extracted modification parameters: {query_params}")
+            
+            modification_type = query_params.get("modification_type")
+            if not modification_type or modification_type == "unknown":
+                return jsonify({
+                    "success": False,
+                    "intent": "modify_events",
+                    "message": "Couldn't determine what modification you want to make",
+                    "humanizedResponse": "I'm not sure how you want to modify your event. Could you please be more specific about what you'd like to change?"
+                }), 400
+            
+            # Get calendar IDs based on preferences or specified calendar
+            calendar_ids = []
+            if query_params.get("calendar_name"):
+                calendar_id = get_calendar_id(query_params.get("calendar_name"))
+                calendar_ids = [calendar_id]
+            elif user_preferred_calendars:
+                calendar_ids = [cal['id'] for cal in user_preferred_calendars]
+            else:
+                calendar_ids = ["primary"]
+            
+            # Match the events to modify
+            matching_events = match_events_for_modification(service, calendar_ids, query_params)
+            
+            if not matching_events:
+                return jsonify({
+                    "success": False,
+                    "intent": "modify_events",
+                    "message": "No matching events found",
+                    "humanizedResponse": f"I couldn't find any events matching your description. Could you try describing the event differently?"
+                }), 404
+            
+            # If multiple matches, we'll need to handle that
+            # For now, just take the first match for simplicity
+            target_event = matching_events[0]
+            event_summary = target_event.get('summary', 'Untitled Event')
+            
+            # If we have multiple matches, provide a selection interface
+            if len(matching_events) > 1:
+                event_choices = []
+                for event in matching_events:
+                    start_dt = dateutil_parse(event['start']['dateTime'])
+                    formatted_time = start_dt.strftime("%I:%M %p")
+                    formatted_date = start_dt.strftime("%A, %B %d")
+                    
+                    event_choices.append({
+                        "id": event['id'],
+                        "summary": event.get('summary', 'Untitled Event'),
+                        "start": event['start']['dateTime'],
+                        "end": event['end']['dateTime'],
+                        "calendar_id": event.get('calendarId', 'primary'),
+                        "display_time": f"{formatted_date} at {formatted_time}"
+                    })
+                
+                # Return a response asking the user to select which event to modify
+                selection_html = f"""
+                <div class='event-selection-card'>
+                    <p>I found multiple matching events. Which one would you like to {modification_type}?</p>
+                    <ul class='event-choices'>
+                """
+                
+                for choice in event_choices:
+                    selection_html += f"""
+                    <li>
+                        <div class="event-choice">
+                            <span class="event-title">{choice['summary']}</span>
+                            <span class="event-time">{choice['display_time']}</span>
+                            <button class="action-button small" onclick="selectEventToModify('{choice['id']}', '{choice['calendar_id']}', '{modification_type}', {json.dumps(query_params).replace('"', '&quot;')})">Select</button>
+                        </div>
+                    </li>
+                    """
+                
+                selection_html += "</ul></div>"
+                
+                return jsonify({
+                    "success": True,
+                    "intent": "modify_events",
+                    "modification_type": modification_type,
+                    "message": "Multiple matching events found",
+                    "humanizedResponse": selection_html,
+                    "multiple_matches": True,
+                    "matching_events": event_choices,
+                    "query_params": query_params
+                })
+            
+            # Apply the requested modification
+            modification_result = apply_event_modification(service, target_event, modification_type, query_params)
+            
+            # Generate a user-friendly response
+            humanized_response = generate_modification_response(modification_result, modification_type, event_summary)
+            
+            return jsonify({
+                "success": modification_result.get("success", False),
+                "intent": "modify_events",
+                "modification_type": modification_type,
+                "message": modification_result.get("message", ""),
+                "humanizedResponse": humanized_response,
+                "event": modification_result.get("event")
+            })
         
     except Exception as e:
         logger.error(f"Error processing natural language: {e}")
@@ -1756,6 +2505,101 @@ def schedule_selected_slot():
             "success": False,
             "message": f"Error scheduling event: {str(e)}"
         }), 500
+
+@app.route('/api/modify-selected-event', methods=['POST'])
+def modify_selected_event():
+    try:
+        data = request.json
+        event_id = data.get('eventId')
+        calendar_id = data.get('calendarId', 'primary')
+        modification_type = data.get('modificationType')
+        query_params = data.get('queryParams', {})
+        
+        if not event_id or not modification_type:
+            return jsonify({
+                "success": False,
+                "message": "Missing event ID or modification type"
+            }), 400
+        
+        creds = get_credentials()
+        service = build("calendar", "v3", credentials=creds)
+        
+        # Get the full event details
+        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        event['calendarId'] = calendar_id  # Ensure calendar ID is included
+        
+        # Apply the modification
+        modification_result = apply_event_modification(service, event, modification_type, query_params)
+        
+        # Generate a user-friendly response
+        event_summary = event.get('summary', 'Untitled Event')
+        humanized_response = generate_modification_response(modification_result, modification_type, event_summary)
+        
+        return jsonify({
+            "success": modification_result.get("success", False),
+            "intent": "modify_events",
+            "modification_type": modification_type,
+            "message": modification_result.get("message", ""),
+            "humanizedResponse": humanized_response,
+            "event": modification_result.get("event")
+        })
+    except Exception as e:
+        logger.error(f"Error modifying selected event: {e}")
+        return jsonify({
+            "success": False,
+            "message": f"Error modifying event: {str(e)}",
+            "humanizedResponse": "I encountered an error while trying to modify the event. Please try again."
+        }), 500
+
+def predict_calendar_for_event(event_text, user_calendars):
+    """Predict the most appropriate calendar for an event based on its description and available calendars."""
+    try:
+        if not user_calendars or len(user_calendars) <= 1:
+            return "primary"  # Default to primary if no options available
+        
+        # Initialize the model
+        model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+        model.temperature = 0.2
+        
+        calendar_options = []
+        for cal in user_calendars:
+            cal_name = cal.get('summary', '')
+            cal_id = cal.get('id', '')
+            calendar_options.append(f"- {cal_name} (ID: {cal_id})")
+        
+        calendar_list = "\n".join(calendar_options)
+        
+        prediction_prompt = f"""
+        As a calendar assistant, determine the most appropriate calendar for the following event:
+        
+        Event text: "{event_text}"
+        
+        Available calendars:
+        {calendar_list}
+        
+        Based on the event description and calendar names, return ONLY the ID of the most appropriate calendar.
+        If you cannot determine a specific calendar or if nothing clearly matches, return "primary".
+        
+        Return ONLY the calendar ID, nothing else.
+        """
+        
+        response = model.generate_content(prediction_prompt)
+        predicted_calendar = response.text.strip()
+        
+        # Clean up the response
+        if "ID:" in predicted_calendar:
+            predicted_calendar = predicted_calendar.split("ID:")[1].strip()
+        
+        # Verify the predicted calendar exists in user calendars
+        calendar_ids = [cal.get('id') for cal in user_calendars]
+        if predicted_calendar not in calendar_ids and predicted_calendar != "primary":
+            logger.warning(f"Predicted calendar {predicted_calendar} not found in user calendars, defaulting to primary")
+            return "primary"
+            
+        return predicted_calendar
+    except Exception as e:
+        logger.error(f"Error predicting calendar: {e}")
+        return "primary"  # Default to primary on error
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

@@ -1,6 +1,15 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, memo, useMemo, Suspense, lazy } from 'react';
 import axios from 'axios';
 import './App.css';
+
+// Remove lazy loading for FullCalendar and its plugins
+// Old code:
+// const FullCalendar = lazy(() => import('@fullcalendar/react'));
+// const dayGridPlugin = lazy(() => import('@fullcalendar/daygrid'));
+// const timeGridPlugin = lazy(() => import('@fullcalendar/timegrid'));
+// const interactionPlugin = lazy(() => import('@fullcalendar/interaction'));
+
+// New code: import synchronously
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
@@ -45,6 +54,131 @@ const setupGlobalFunctions = () => {
   }
 };
 
+// Memoize the renderEventContent function to avoid recreating it on each render
+const renderEventContent = (eventInfo) => {
+  // Determine if this is a suggested slot or existing event
+  const isSuggested = eventInfo.event.extendedProps?.suggestedSlot === true;
+  const isExisting = eventInfo.event.extendedProps?.existingEvent === true;
+  
+  // Format the time more cleanly
+  let timeText = eventInfo.timeText || '';
+  if (timeText.includes('-')) {
+    // Simplify time range display
+    const times = timeText.split('-');
+    timeText = times[0].trim() + ' - ' + times[1].trim();
+  }
+  
+  // Get the calendar name if available
+  let calendarName = '';
+  if (isExisting && eventInfo.event.extendedProps?.calendarName) {
+    calendarName = `(${eventInfo.event.extendedProps.calendarName})`;
+  }
+  
+  // Get the event title with fallback options
+  const title = eventInfo.event.title || 
+                eventInfo.event.extendedProps?.summary || 
+                (isSuggested ? 'Suggested Time' : 'Event');
+  
+  return (
+    <div className={`event-content ${isSuggested ? 'suggested-event' : 'existing-event'}`}>
+      <b>{timeText}</b>
+      <i>{title} {calendarName}</i>
+    </div>
+  );
+};
+
+// Define the Calendar component outside of the main component
+const CalendarComponent = memo(({ 
+  events, 
+  handleEventClick, 
+  handleDatesSet, 
+  loading,
+  renderEventContent 
+}) => {
+  return (
+    <div className={`calendar-container ${loading ? 'loading' : ''}`}>
+      <FullCalendar
+        plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
+        initialView="timeGridWeek"
+        headerToolbar={{
+          left: 'prev,next today',
+          center: 'title',
+          right: 'dayGridMonth,timeGridWeek,timeGridDay'
+        }}
+        events={events}
+        eventClick={handleEventClick}
+        eventContent={renderEventContent}
+        height="800px"
+        nowIndicator={true}
+        datesSet={handleDatesSet}
+        slotMinTime="07:00:00"
+        slotMaxTime="23:00:00"
+        eventTimeFormat={{
+          hour: 'numeric',
+          minute: '2-digit',
+          meridiem: 'short'
+        }}
+        slotLabelFormat={{
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true
+        }}
+        allDaySlot={false}
+        eventDisplay="block"
+        eventBackgroundColor="#4285f4"
+        eventBorderColor="#3b78e7"
+        eventTextColor="#ffffff"
+        displayEventTime={true}
+        displayEventEnd={true}
+        forceEventDuration={true}
+        eventMinHeight={30}
+        lazyFetching={true}
+      />
+    </div>
+  );
+});
+
+CalendarComponent.displayName = 'CalendarComponent';
+
+// The calendar selection component
+const CalendarSelectionComponent = memo(({ calendars, selected, onSelect, disabled }) => {
+  return (
+    <div className="calendar-selection">
+      <h3>Select Calendars to Monitor:</h3>
+      {calendars.length > 0 ? (
+        calendars.map((cal) => (
+          <label key={cal.id} style={{ 
+            display: 'block', 
+            margin: '5px 0',
+            padding: '8px',
+            backgroundColor: selected.some(s => s.id === cal.id) ? '#f0f7ff' : 'transparent',
+            borderRadius: '4px',
+            cursor: disabled ? 'not-allowed' : 'pointer'
+          }}>
+            <input
+              type="checkbox"
+              checked={selected.some((s) => s.id === cal.id)}
+              onChange={() => onSelect(cal)}
+              disabled={disabled}
+            />
+            <span style={{
+              marginLeft: '8px',
+              color: cal.primary ? '#1a73e8' : 'inherit',
+              fontWeight: cal.primary ? '500' : 'normal'
+            }}>
+              {cal.summary} {cal.primary ? '(Primary)' : ''}
+            </span>
+          </label>
+        ))
+      ) : (
+        <p>Loading calendars...</p>
+      )}
+    </div>
+  );
+});
+
+CalendarSelectionComponent.displayName = 'CalendarSelectionComponent';
+
 function NaturalLanguageForm() {
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -57,6 +191,9 @@ function NaturalLanguageForm() {
   const [showCalendar, setShowCalendar] = useState(false);
   const [eventDetails, setEventDetails] = useState({});
   const [selectedSlots, setSelectedSlots] = useState([]);
+  // Add cache for events data
+  const [eventsCache, setEventsCache] = useState({});
+  const [fetchingEvents, setFetchingEvents] = useState(false);
   
   // Call the setup function on load
   useEffect(() => {
@@ -69,6 +206,211 @@ function NaturalLanguageForm() {
     start: new Date(),
     end: new Date(new Date().setDate(new Date().getDate() + 7))
   });
+
+  // Helper function to format date to YYYY-MM-DD
+  const formatDate = (date) => {
+    const d = new Date(date);
+    let month = '' + (d.getMonth() + 1);
+    let day = '' + d.getDate();
+    const year = d.getFullYear();
+
+    if (month.length < 2) month = '0' + month;
+    if (day.length < 2) day = '0' + day;
+
+    return [year, month, day].join('-');
+  };
+
+  // Helper function to get color for a specific calendar
+  const getCalendarColor = (calendarId, darker = false) => {
+    // Find the calendar in our list
+    const calendar = calendars.find(cal => cal.id === calendarId);
+    if (calendar && calendar.backgroundColor) {
+      // Enhance color vibrancy by ensuring full opacity
+      let color = calendar.backgroundColor;
+      
+      // If it's an RGBA color, convert to fully opaque
+      if (color.startsWith('rgba')) {
+        const rgbaPattern = /rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*[\d.]+\s*\)/;
+        const match = color.match(rgbaPattern);
+        if (match) {
+          color = `rgb(${match[1]}, ${match[2]}, ${match[3]})`;
+        }
+      }
+      
+      if (darker) {
+        // Create a slightly darker version for the border
+        return darkenColor(color, 0.2);
+      }
+      return color;
+    }
+    // Default color if calendar not found - using a more vibrant blue
+    return darker ? '#1565C0' : '#1E88E5';
+  };
+
+  // Helper function to darken a color
+  const darkenColor = (color, amount) => {
+    try {
+      // Handle RGB format
+      if (color.startsWith('rgb')) {
+        const rgbPattern = /rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/;
+        const match = color.match(rgbPattern);
+        if (match) {
+          let r = parseInt(match[1], 10);
+          let g = parseInt(match[2], 10);
+          let b = parseInt(match[3], 10);
+          
+          r = Math.max(0, Math.floor(r * (1 - amount)));
+          g = Math.max(0, Math.floor(g * (1 - amount)));
+          b = Math.max(0, Math.floor(b * (1 - amount)));
+          
+          return `rgb(${r}, ${g}, ${b})`;
+        }
+      }
+      
+      // Remove the hash if it exists for hex colors
+      color = color.replace('#', '');
+      
+      // Parse the color
+      let r = parseInt(color.substring(0, 2), 16);
+      let g = parseInt(color.substring(2, 4), 16);
+      let b = parseInt(color.substring(4, 6), 16);
+      
+      // Darken the color
+      r = Math.max(0, Math.floor(r * (1 - amount)));
+      g = Math.max(0, Math.floor(g * (1 - amount)));
+      b = Math.max(0, Math.floor(b * (1 - amount)));
+      
+      // Convert back to hex
+      return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+    } catch (e) {
+      console.error('Error darkening color:', e);
+      return color; // Return original color if there's an error
+    }
+  };
+
+  // Define fetchExistingEvents before it's used in the event listener
+  const fetchExistingEvents = useCallback(async (forceRefresh = false) => {
+    // Prevent multiple simultaneous requests
+    if (fetchingEvents) return;
+    
+    try {
+      setFetchingEvents(true);
+      const startDate = formatDate(dateRange.start);
+      const endDate = formatDate(dateRange.end);
+      
+      // Skip logging in production
+      if (process.env.NODE_ENV !== 'production') {
+        console.log("Fetching events from:", startDate, "to", endDate);
+      }
+      
+      // Create the calendar IDs parameter
+      const calendarIds = selectedCalendars.map(cal => cal.id).join(',');
+      
+      // Create a cache key based on date range and selected calendars
+      const cacheKey = `${startDate}_${endDate}_${calendarIds}`;
+      
+      // Check if we have cached data and not forcing refresh
+      if (!forceRefresh && eventsCache[cacheKey] && eventsCache[cacheKey].expiry > Date.now()) {
+        setExistingEvents(eventsCache[cacheKey].data);
+        setFetchingEvents(false);
+        return;
+      }
+      
+      // Add retry logic
+      let retries = 0;
+      const maxRetries = 3;
+      let response;
+      
+      while (retries < maxRetries) {
+        try {
+          response = await axios.get(
+            `http://127.0.0.1:5000/api/get-events?start=${startDate}&end=${endDate}&calendars=${calendarIds}`
+          );
+          break; // Success, exit retry loop
+        } catch (err) {
+          const currentRetry = retries; // Capture current value to avoid the loop reference issue
+          retries++;
+          if (currentRetry === maxRetries - 1) throw err;
+          // Wait before retrying (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, currentRetry + 1)));
+        }
+      }
+      
+      if (response.data.success) {
+        // Check if there are any events in the response
+        let events = response.data.events || [];
+        
+        // If no events are returned and we're in development mode, add some mock events for testing
+        if (events.length === 0 && process.env.NODE_ENV === 'development') {
+          console.log("No events returned from API, adding mock events for testing");
+          // Create a few mock events for the current week
+          const now = new Date();
+          const tomorrow = new Date(now);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          
+          events = [
+            {
+              id: 'mock-1',
+              title: 'Team Meeting',
+              start: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 10, 0).toISOString(),
+              end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 11, 0).toISOString(),
+              calendarId: 'primary',
+              calendarName: 'Primary Calendar'
+            },
+            {
+              id: 'mock-2',
+              title: 'Lunch Break',
+              start: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0).toISOString(),
+              end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 13, 0).toISOString(),
+              calendarId: 'primary',
+              calendarName: 'Primary Calendar'
+            },
+            {
+              id: 'mock-3',
+              title: 'Project Review',
+              start: new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 14, 0).toISOString(),
+              end: new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 15, 30).toISOString(),
+              calendarId: 'work',
+              calendarName: 'Work Calendar'
+            }
+          ];
+        }
+        
+        if (events.length > 0) {
+          // Process all events at once with minimal logging
+          const eventsWithMetadata = events.map(event => ({
+            ...event,
+            title: event.title || event.summary || "Untitled Event",
+            existingEvent: true,
+            backgroundColor: event.backgroundColor || getCalendarColor(event.calendarId),
+            borderColor: event.borderColor || getCalendarColor(event.calendarId, true),
+            textColor: event.textColor || '#ffffff',
+            classNames: ['calendar-event']  // Add a class for additional styling
+          }));
+          
+          // Update the cache with a 5-minute expiration
+          setEventsCache(prev => ({
+            ...prev,
+            [cacheKey]: {
+              data: eventsWithMetadata,
+              expiry: Date.now() + 5 * 60 * 1000 // 5 minutes
+            }
+          }));
+          
+          setExistingEvents(eventsWithMetadata);
+        } else {
+          setExistingEvents([]);
+        }
+      } else {
+        console.error('Error fetching events:', response.data.message);
+      }
+    } catch (error) {
+      console.error('Error fetching events:', error);
+      setError('Failed to load events. Please try again.');
+    } finally {
+      setFetchingEvents(false);
+    }
+  }, [dateRange, formatDate, getCalendarColor, selectedCalendars, eventsCache, fetchingEvents, setError]);
 
   // Define handleSubmit with useCallback before it's used in handleScheduleItem
   const handleSubmit = useCallback(async (e) => {
@@ -133,9 +475,9 @@ function NaturalLanguageForm() {
           }
           
           setEventDetails({
-            summary: getEventSummaryFromText(text),
+            summary: response.data.calendar_title || getEventSummaryFromText(text),
             description: text,
-            calendarId: "primary"
+            calendarId: response.data.predicted_calendar || "primary"
           });
         } else if (response.data.intent === "view_events") {
           // Just display the humanized response for view_events, no calendar needed
@@ -197,47 +539,70 @@ function NaturalLanguageForm() {
   useEffect(() => {
     window.addEventListener('scheduleCalendarItem', handleScheduleItem);
     
-    // Clean up event listener
+    // Add event listener for refreshCalendar event
+    const handleRefreshCalendar = () => {
+      if (showCalendar) {
+        console.log("Refreshing calendar events via refreshCalendar event");
+        fetchExistingEvents();
+      }
+    };
+    
+    window.addEventListener('refreshCalendar', handleRefreshCalendar);
+    
+    // Clean up event listeners
     return () => {
       window.removeEventListener('scheduleCalendarItem', handleScheduleItem);
+      window.removeEventListener('refreshCalendar', handleRefreshCalendar);
     };
-  }, [handleScheduleItem]);
+  }, [handleScheduleItem, fetchExistingEvents, showCalendar]);
+
+  // Fetch existing events when calendar is shown or date range changes
+  useEffect(() => {
+    if (showCalendar) {
+      console.log("Fetching existing events because calendar is shown or date range changed");
+      fetchExistingEvents();
+    }
+  }, [showCalendar, dateRange, fetchExistingEvents]);
 
   // Fetch all calendars and current preferences on mount
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch all calendars
-        const calendarsResponse = await axios.get('http://127.0.0.1:5000/api/get-calendars');
+        // Use Promise.all to fetch calendars and preferences in parallel
+        const [calendarsResponse, prefsResponse] = await Promise.all([
+          axios.get('http://127.0.0.1:5000/api/get-calendars'),
+          axios.get('http://127.0.0.1:5000/api/get-preferred-calendars')
+        ]);
+        
         if (!calendarsResponse.data.success) {
-          throw new Error('Failed to fetch calendars');
+          throw new Error(`Failed to fetch calendars: ${calendarsResponse.data.message || 'Unknown error'}`);
         }
-        const allCalendars = calendarsResponse.data.calendars;
-        setCalendars(allCalendars);
-
-        // Fetch current preferred calendars
-        const prefsResponse = await axios.get('http://127.0.0.1:5000/api/get-preferred-calendars');
+        
         if (!prefsResponse.data.success) {
-          throw new Error('Failed to fetch preferred calendars');
+          throw new Error(`Failed to fetch preferred calendars: ${prefsResponse.data.message || 'Unknown error'}`);
         }
+        
+        const allCalendars = calendarsResponse.data.calendars;
         const preferredCals = prefsResponse.data.calendars;
 
-        // If there are saved preferences, use them; otherwise, default to primary
+        // Update state all at once to avoid multiple re-renders
         if (preferredCals.length > 0) {
-          // Ensure the saved preferences match the full calendar data (e.g., include all fields)
+          // Ensure the saved preferences match the full calendar data
           const syncedPrefs = preferredCals.map(pref => 
             allCalendars.find(cal => cal.id === pref.id) || pref
           );
+          setCalendars(allCalendars);
           setSelectedCalendars(syncedPrefs);
         } else {
           const primaryCal = allCalendars.find(cal => cal.primary);
+          setCalendars(allCalendars);
           if (primaryCal) {
             setSelectedCalendars([primaryCal]);
           }
         }
       } catch (error) {
         console.error('Error fetching data:', error);
-        setError('Error loading calendars or preferences.');
+        setError(`Error loading calendars or preferences: ${error.message}`);
       }
     };
     fetchData();
@@ -248,12 +613,18 @@ function NaturalLanguageForm() {
     if (selectedCalendars.length > 0) {
       const sendPreferences = async () => {
         try {
-          const response = await axios.post('http://127.0.0.1:5000/api/set-preferred-calendars', {
-            calendars: selectedCalendars
-          });
-          if (!response.data.success) {
-            throw new Error(response.data.message);
-          }
+          // Debounce the API call to avoid excessive requests
+          const timeoutId = setTimeout(async () => {
+            const response = await axios.post('http://127.0.0.1:5000/api/set-preferred-calendars', {
+              calendars: selectedCalendars
+            });
+            if (!response.data.success) {
+              throw new Error(response.data.message);
+            }
+          }, 500); // Wait 500ms before sending the request
+          
+          // Clear the timeout if the effect runs again before it fires
+          return () => clearTimeout(timeoutId);
         } catch (error) {
           console.error('Error setting preferred calendars:', error);
           setError('Error saving calendar preferences.');
@@ -263,50 +634,19 @@ function NaturalLanguageForm() {
     }
   }, [selectedCalendars]);
 
-  const fetchExistingEvents = useCallback(async () => {
-    try {
-      const startDate = formatDate(dateRange.start);
-      const endDate = formatDate(dateRange.end);
-      const response = await axios.get(`http://127.0.0.1:5000/api/get-events?start=${startDate}&end=${endDate}`);
-      
-      if (response.data.success) {
-        setExistingEvents(response.data.events);
-      } else {
-        console.error('Error fetching events:', response.data.message);
-      }
-    } catch (error) {
-      console.error('Error fetching events:', error);
-    }
-  }, [dateRange]);
-
-  // Fetch existing events when dateRange changes or when viewing calendar
-  useEffect(() => {
-    if (showCalendar) {
-      fetchExistingEvents();
-    }
-  }, [dateRange, showCalendar, fetchExistingEvents]);
-
-  const formatDate = (date) => {
-    const d = new Date(date);
-    let month = '' + (d.getMonth() + 1);
-    let day = '' + d.getDate();
-    const year = d.getFullYear();
-
-    if (month.length < 2) month = '0' + month;
-    if (day.length < 2) day = '0' + day;
-
-    return [year, month, day].join('-');
-  };
-
-  const handleCalendarSelect = (cal) => {
+  const handleCalendarSelect = useCallback((cal) => {
     setSelectedCalendars((prev) => {
-      if (prev.some((selected) => selected.id === cal.id)) {
-        return prev.filter((selected) => selected.id !== cal.id);
-      } else {
-        return [...prev, cal];
-      }
+      // Check if we're adding or removing a calendar
+      const isRemovingCalendar = prev.some((selected) => selected.id === cal.id);
+      const newCalendars = isRemovingCalendar
+        ? prev.filter((selected) => selected.id !== cal.id)
+        : [...prev, cal];
+        
+      // Clear events cache when calendars change
+      setEventsCache({});
+      return newCalendars;
     });
-  };
+  }, [setEventsCache]);
 
   const getEventSummaryFromText = (text) => {
     const firstSentence = text.split('.')[0];
@@ -349,10 +689,20 @@ function NaturalLanguageForm() {
       if (isSelected) {
         event.setProp('backgroundColor', '#4caf50');
         event.setProp('borderColor', '#2e7d32');
+        event.setProp('title', 'Selected Time');
       } else {
         event.setProp('backgroundColor', '#8bc34a');
         event.setProp('borderColor', '#689f38');
+        event.setProp('title', 'Suggested Time');
       }
+    } else {
+      // For existing events, show some details in a tooltip or alert
+      const eventTitle = event.title;
+      const eventTime = `${event.start.toLocaleTimeString()} - ${event.end.toLocaleTimeString()}`;
+      const calendarName = event.extendedProps.calendarName || 'Unknown Calendar';
+      
+      // Simple alert for demonstration - in a real app, you might want a tooltip or modal
+      alert(`Event: ${eventTitle}\nTime: ${eventTime}\nCalendar: ${calendarName}`);
     }
   };
 
@@ -411,14 +761,22 @@ function NaturalLanguageForm() {
   };
   
   const handleDatesSet = (dateInfo) => {
+    console.log("Calendar dates changed:", dateInfo.startStr, "to", dateInfo.endStr);
     setDateRange({
       start: dateInfo.start,
       end: dateInfo.end
     });
+    
+    // If calendar is currently showing, fetch events for the new date range
+    if (showCalendar) {
+      console.log("Fetching events for new date range");
+      fetchExistingEvents();
+    }
   };
   
-  const getAllEvents = () => {
-    // Combine existing events with suggested slots
+  // Optimize to avoid recalculation on each render
+  const getAllEvents = useCallback(() => {
+    // Start with existing events
     const allEvents = [...existingEvents];
     
     // Add suggested slots with updated colors based on selection
@@ -432,36 +790,33 @@ function NaturalLanguageForm() {
           ...event,
           backgroundColor: isSelected ? '#4caf50' : '#8bc34a',
           borderColor: isSelected ? '#2e7d32' : '#689f38',
-          title: isSelected ? 'Selected Time' : 'Suggested Time'
+          textColor: '#ffffff',
+          title: isSelected ? 'Selected Time' : 'Suggested Time',
+          display: 'block',
+          extendedProps: {
+            ...event.extendedProps,
+            suggestedSlot: true
+          }
         });
       });
     }
     
     return allEvents;
-  };
+  }, [existingEvents, calendarEvents, selectedSlots]);
+
+  // Precalculate events to avoid useMemo in render
+  const currentEvents = getAllEvents();
 
   return (
     <div className="natural-language-form">
       <h2>Create Event with Natural Language</h2>
 
-      <div className="calendar-selection">
-        <h3>Select Calendars to Monitor:</h3>
-        {calendars.length > 0 ? (
-          calendars.map((cal) => (
-            <label key={cal.id} style={{ display: 'block', margin: '5px 0' }}>
-              <input
-                type="checkbox"
-                checked={selectedCalendars.some((selected) => selected.id === cal.id)}
-                onChange={() => handleCalendarSelect(cal)}
-                disabled={loading}
-              />
-              {cal.summary} {cal.primary ? '(Primary)' : ''}
-            </label>
-          ))
-        ) : (
-          <p>Loading calendars...</p>
-        )}
-      </div>
+      <CalendarSelectionComponent 
+        calendars={calendars}
+        selected={selectedCalendars}
+        onSelect={handleCalendarSelect}
+        disabled={loading}
+      />
 
       {error && <div className="error-message">{error}</div>}
       {message && <div className="success-message" dangerouslySetInnerHTML={{ __html: message }} />}
@@ -491,49 +846,45 @@ function NaturalLanguageForm() {
             </div>
           )}
           <div className="calendar-legend">
-            <div className="legend-item">
-              <span className="legend-color existing-event-color"></span>
-              <span>Existing Events</span>
+            {/* Legend for suggested/selected slots */}
+            <div className="legend-section">
+              <div className="legend-item">
+                <span className="legend-color suggested-event-color"></span>
+                <span>Suggested Work Slots</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-color selected-event-color"></span>
+                <span>Selected Work Slots</span>
+              </div>
             </div>
-            <div className="legend-item">
-              <span className="legend-color suggested-event-color"></span>
-              <span>Suggested Work Slots</span>
-            </div>
-            <div className="legend-item">
-              <span className="legend-color selected-event-color"></span>
-              <span>Selected Work Slots</span>
+            
+            {/* Legend for calendars */}
+            <div className="legend-section">
+              <div className="legend-title">Your Calendars:</div>
+              {selectedCalendars.map(cal => (
+                <div className="legend-item" key={cal.id}>
+                  <span 
+                    className="legend-color" 
+                    style={{ 
+                      backgroundColor: cal.backgroundColor || getCalendarColor(cal.id),
+                      border: `1px solid ${cal.borderColor || getCalendarColor(cal.id, true)}`
+                    }}
+                  ></span>
+                  <span>{cal.summary}</span>
+                </div>
+              ))}
             </div>
           </div>
-          <div className="calendar-container">
-            <FullCalendar
-              plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
-              initialView="timeGridWeek"
-              headerToolbar={{
-                left: 'prev,next today',
-                center: 'title',
-                right: 'dayGridMonth,timeGridWeek,timeGridDay'
-              }}
-              events={getAllEvents()}
-              eventClick={handleEventClick}
-              eventContent={renderEventContent}
-              height="800px"
-              nowIndicator={true}
-              datesSet={handleDatesSet}
-              slotMinTime="00:00:00"
-              slotMaxTime="24:00:00"
-              eventTimeFormat={{
-                hour: 'numeric',
-                minute: '2-digit',
-                meridiem: 'short'
-              }}
-              slotLabelFormat={{
-                hour: 'numeric',
-                minute: '2-digit',
-                hour12: true
-              }}
-              allDaySlot={false}
-            />
-          </div>
+          
+          {/* Use the memoized calendar component with precalculated events */}
+          <CalendarComponent 
+            events={currentEvents}
+            handleEventClick={handleEventClick}
+            handleDatesSet={handleDatesSet}
+            loading={loading || fetchingEvents} 
+            renderEventContent={renderEventContent}
+          />
+          
           <div className="calendar-actions">
             <button
               onClick={handleScheduleSelected}
@@ -552,27 +903,6 @@ function NaturalLanguageForm() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function renderEventContent(eventInfo) {
-  const isSuggested = eventInfo.event.extendedProps.suggestedSlot;
-  // eslint-disable-next-line no-unused-vars
-  const isExisting = eventInfo.event.extendedProps.existingEvent;
-  
-  // Format the time more cleanly
-  let timeText = eventInfo.timeText;
-  if (timeText.includes('-')) {
-    // Simplify time range display
-    const times = timeText.split('-');
-    timeText = times[0].trim() + ' - ' + times[1].trim();
-  }
-  
-  return (
-    <div className={`event-content ${isSuggested ? 'suggested-event' : 'existing-event'}`}>
-      <b>{timeText}</b>
-      <i>{eventInfo.event.title}</i>
     </div>
   );
 }
@@ -769,8 +1099,100 @@ function App() {
         .action-button.secondary:hover {
           background-color: #757575;
         }
+        
+        .loading-calendar {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 500px;
+          background-color: #f9f9f9;
+          border-radius: 8px;
+          font-size: 18px;
+          color: #666;
+          border: 1px dashed #ddd;
+        }
+        
+        .loading-calendar::after {
+          content: "";
+          display: inline-block;
+          width: 20px;
+          height: 20px;
+          margin-left: 10px;
+          border: 3px solid #ddd;
+          border-top-color: #3498db;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+        
+        .calendar-container {
+          position: relative;
+          min-height: 500px;
+        }
+        
+        .calendar-container::before {
+          content: "";
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background-color: rgba(255, 255, 255, 0.7);
+          z-index: 5;
+          display: none;
+        }
+        
+        .calendar-container.loading::before {
+          display: block;
+        }
+        
+        .fc-event {
+          transition: background-color 0.2s ease;
+        }
+        
+        .fc-event:hover {
+          filter: brightness(110%);
+        }
+        
+        .suggested-event-color {
+          background-color: #8bc34a;
+        }
+        
+        .selected-event-color {
+          background-color: #4caf50;
+        }
+        
+        .event-content {
+          padding: 2px 4px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 12px;
+        }
+        
+        .suggested-event {
+          font-weight: bold;
+        }
+        
+        /* Optimize rendering performance */
+        .fc-view-harness {
+          contain: content;
+          will-change: transform;
+        }
+        
+        /* Prevent layout shifts */
+        .natural-language-form {
+          min-height: 800px;
+        }
       `}</style>
-      <NaturalLanguageForm />
+      <Suspense fallback={<div>Loading application...</div>}>
+        <NaturalLanguageForm />
+      </Suspense>
       <hr />
     </div>
   );

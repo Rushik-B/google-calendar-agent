@@ -99,4 +99,158 @@ window.cancelDurationSelection = function(selectorId) {
   }
 };
 
+// Function to handle event selection for modification
+window.selectEventToModify = function(eventId, calendarId, modificationType, queryParams) {
+  console.log("Selecting event for modification:", eventId, calendarId, modificationType);
+  
+  // Send the request to modify the selected event
+  fetch('/api/modify-selected-event', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      eventId: eventId,
+      calendarId: calendarId,
+      modificationType: modificationType,
+      queryParams: queryParams
+    })
+  })
+  .then(response => response.json())
+  .then(data => {
+    console.log("Modification response:", data);
+    
+    if (data.success) {
+      // Dispatch an event to notify the React app about the successful modification
+      window.dispatchEvent(
+        new CustomEvent('eventModified', {
+          detail: {
+            success: true,
+            eventId: eventId,
+            calendarId: calendarId,
+            modificationType: modificationType,
+            message: data.message,
+            humanizedResponse: data.humanizedResponse
+          }
+        })
+      );
+      
+      // Refresh the calendar to show the updated event
+      window.dispatchEvent(new Event('refreshCalendar'));
+    } else {
+      // Handle error
+      console.error("Error modifying event:", data.message);
+      
+      // Dispatch event for error handling
+      window.dispatchEvent(
+        new CustomEvent('eventModified', {
+          detail: {
+            success: false,
+            message: data.message,
+            humanizedResponse: data.humanizedResponse
+          }
+        })
+      );
+    }
+  })
+  .catch(error => {
+    console.error("Error calling modify-selected-event API:", error);
+    
+    // Dispatch event for error handling
+    window.dispatchEvent(
+      new CustomEvent('eventModified', {
+        detail: {
+          success: false,
+          message: "Failed to communicate with the server",
+          humanizedResponse: "I encountered an error while trying to modify the event. Please try again."
+        }
+      })
+    );
+  });
+};
+
+// Function to reschedule event (used in conflict resolution)
+window.rescheduleEvent = function(eventId, newStart, newEnd, calendarId) {
+  console.log("Rescheduling event:", eventId, "to", newStart, newEnd);
+  
+  // Convert ISO string to date objects for easier formatting
+  const startDate = new Date(newStart);
+  const endDate = new Date(newEnd);
+  
+  // Format the time for display
+  const formatTime = (date) => {
+    return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  };
+  
+  // Create query params with new time and date information
+  const queryParams = {
+    modification_type: "reschedule",
+    new_time: startDate.getHours().toString().padStart(2, '0') + ":" + startDate.getMinutes().toString().padStart(2, '0'),
+    new_date: startDate.toISOString().split('T')[0]  // YYYY-MM-DD format
+  };
+  
+  // Call the API to reschedule the event
+  fetch('/api/modify-selected-event', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      eventId: eventId,
+      calendarId: calendarId || "primary",
+      modificationType: "reschedule",
+      queryParams: queryParams
+    })
+  })
+  .then(response => response.json())
+  .then(data => {
+    console.log("Reschedule response:", data);
+    
+    if (data.success) {
+      // Notify about successful rescheduling
+      window.dispatchEvent(
+        new CustomEvent('eventModified', {
+          detail: {
+            success: true,
+            eventId: eventId,
+            calendarId: calendarId,
+            modificationType: "reschedule",
+            message: data.message,
+            humanizedResponse: data.humanizedResponse
+          }
+        })
+      );
+      
+      // Refresh the calendar
+      window.dispatchEvent(new Event('refreshCalendar'));
+    } else {
+      // Handle error
+      console.error("Error rescheduling event:", data.message);
+      
+      window.dispatchEvent(
+        new CustomEvent('eventModified', {
+          detail: {
+            success: false,
+            message: data.message,
+            humanizedResponse: data.humanizedResponse
+          }
+        })
+      );
+    }
+  })
+  .catch(error => {
+    console.error("Error calling reschedule API:", error);
+    
+    window.dispatchEvent(
+      new CustomEvent('eventModified', {
+        detail: {
+          success: false,
+          message: "Failed to communicate with the server",
+          humanizedResponse: "I encountered an error while trying to reschedule the event. Please try again."
+        }
+      })
+    );
+  });
+};
+
 console.log("Calendar functions loaded from external file"); 

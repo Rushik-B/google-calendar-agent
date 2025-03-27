@@ -1,3 +1,4 @@
+/* Core styles for the natural language form */
 .natural-language-form {
   max-width: 900px;
   margin: 0 auto;
@@ -12,6 +13,7 @@
   color: #333;
 }
 
+/* Form elements */
 .form-group {
   margin-bottom: 15px;
 }
@@ -31,6 +33,7 @@ textarea {
   resize: vertical;
 }
 
+/* Button styles */
 .submit-button, .confirm-button, .reject-button {
   padding: 10px 20px;
   border: none;
@@ -60,6 +63,7 @@ textarea {
   cursor: not-allowed;
 }
 
+/* Message styles */
 .error-message {
   color: #f44336;
   padding: 10px;
@@ -76,102 +80,13 @@ textarea {
   border-radius: 4px;
 }
 
-.time-selection {
-  margin-top: 20px;
-}
-
-.available-slots {
-  max-height: 300px;
-  overflow-y: auto;
-  margin-bottom: 15px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-}
-
-.slot-item {
-  display: flex;
-  align-items: center;
-  padding: 10px 15px;
-  margin: 8px 0;
-  border-radius: 6px;
-  background-color: #f8f9fa;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.slot-item:hover {
-  background-color: #e9ecef;
-}
-
-.slot-item.selected {
-  background-color: #d8e8ff;
-  border-left: 4px solid #3f80ea;
-}
-
-.slot-checkbox {
-  margin-right: 15px;
-}
-
-.slot-checkbox input {
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-}
-
-.slot-time {
-  flex: 1;
-}
-
+/* Selection summary */
 .selection-summary {
   margin: 10px 0;
   padding: 10px;
   background-color: #e6f3ff;
   border-radius: 6px;
   font-weight: 500;
-}
-
-.slot-actions {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 20px;
-}
-
-.confirm-button, .reject-button {
-  padding: 10px 20px;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 500;
-  transition: all 0.2s;
-}
-
-.confirm-button {
-  background-color: #4CAF50;
-  color: white;
-}
-
-.confirm-button:hover:not(:disabled) {
-  background-color: #43a047;
-}
-
-.reject-button {
-  background-color: #f44336;
-  color: white;
-}
-
-.reject-button:hover:not(:disabled) {
-  background-color: #e53935;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.no-slots {
-  padding: 20px;
-  text-align: center;
-  color: #666;
 }
 
 hr {
@@ -181,17 +96,11 @@ hr {
   background-color: #ddd;
 }
 
-.calendar-form {
-  max-width: 600px;
-  margin: 0 auto;
-  padding: 20px;
-  background-color: #f9f9f9;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
+/* Calendar selection */
 .calendar-selection {
   margin-bottom: 20px;
 }
+
 .calendar-selection h3 {
   font-size: 1.1em;
   margin-bottom: 10px;
@@ -248,6 +157,7 @@ hr {
   border-color: #2c5cc5;
 }
 
+/* Event styling */
 .event-content {
   font-size: 0.8em;
   line-height: 1.2;
@@ -262,6 +172,7 @@ hr {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .fc-timegrid-event {
@@ -277,37 +188,52 @@ hr {
   margin-right: 1px !important;
 }
 
+/* Enhanced event styling for better visibility */
+.fc-event {
+  filter: saturate(1.4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  border-width: 0 0 0 4px !important;
+}
+
+/* Specific styling for regular calendar events */
+.calendar-event {
+  opacity: 1 !important; /* Ensure full opacity */
+  filter: saturate(1.5) brightness(1.05); /* Increase color vibrancy */
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15); /* Stronger shadow for depth */
+  border-radius: 3px; /* Slightly rounded corners */
+  font-weight: 500; /* Bolder text */
+}
+
+.calendar-event .fc-event-main {
+  padding: 2px 4px !important; /* More padding for better readability */
+}
+
 .suggested-event {
-  border-left: 3px solid #4caf50;
+  border-left: 4px solid #4caf50 !important;
   cursor: pointer;
-  background-color: rgba(76, 175, 80, 0.2) !important;
 }
 
 .existing-event {
-  border-left: 3px solid #2196f3;
-  background-color: rgba(33, 150, 243, 0.15) !important;
+  border-left: 4px solid transparent !important;
 }
 
-/* Add a checkmark to selected suggested events */
-.fc-event-selected .suggested-event::before {
-  content: "✓";
-  position: absolute;
-  right: 5px;
-  top: 2px;
-  font-weight: bold;
-  color: white;
-}
-
-/* Make event times more readable */
+/* Style for calendar event content */
 .event-content b {
   display: block;
   margin-bottom: 2px;
   font-weight: 600;
+  font-size: 0.9em;
 }
 
 .event-content i {
+  display: block;
   font-style: normal;
   opacity: 0.9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.9em;
+  font-weight: 500;
 }
 
 /* Add more space between days in week view */
@@ -336,6 +262,7 @@ hr {
   }
 }
 
+/* Calendar legend styles */
 .calendar-legend {
   display: flex;
   flex-wrap: wrap;
@@ -344,6 +271,20 @@ hr {
   padding: 10px;
   background-color: #f8f9fa;
   border-radius: 6px;
+}
+
+.legend-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-right: 20px;
+}
+
+.legend-title {
+  font-weight: 600;
+  margin-bottom: 5px;
+  font-size: 0.9em;
+  color: #555;
 }
 
 .legend-item {
@@ -358,24 +299,21 @@ hr {
   height: 14px;
   margin-right: 6px;
   border-radius: 3px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
-.existing-event-color {
-  background-color: rgba(33, 150, 243, 0.7);
-  border: 1px solid #2196f3;
-}
-
+/* Colors for different event types */
 .suggested-event-color {
-  background-color: rgba(76, 175, 80, 0.4);
+  background-color: rgba(76, 175, 80, 0.85);
   border: 1px solid #4caf50;
 }
 
 .selected-event-color {
-  background-color: rgba(76, 175, 80, 0.8);
+  background-color: rgba(76, 175, 80, 1);
   border: 1px solid #2e7d32;
 }
 
-/* Style for current time indicator */
+/* Current time indicator */
 .fc .fc-timegrid-now-indicator-line {
   border-color: #ff0000;
   border-width: 2px;
@@ -384,4 +322,77 @@ hr {
 .fc .fc-timegrid-now-indicator-arrow {
   border-color: #ff0000;
   border-width: 5px;
+}
+
+/* Free time styles used in the backend HTML responses */
+.free-time-card {
+  margin: 15px 0;
+  padding: 15px;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.time-slot {
+  font-weight: bold;
+  color: #4285f4;
+}
+
+.free-time-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+}
+
+.action-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  background-color: #4285f4;
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.action-button:hover {
+  background-color: #3b78e7;
+}
+
+.action-button.secondary {
+  background-color: #f1f3f4;
+  color: #3c4043;
+}
+
+.action-button.secondary:hover {
+  background-color: #e8eaed;
+}
+
+.action-button.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Duration selector for break scheduling */
+.duration-selector {
+  background-color: #f9f9f9;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 10px;
+  border: 1px solid #ddd;
+}
+
+.duration-selector input[type="range"] {
+  width: 100%;
+  margin: 10px 0;
+}
+
+/* Simplistic slot item styling */
+.slot-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  margin: 8px 0;
+  background-color: #f8f9fa;
+  border-radius: 4px;
 }

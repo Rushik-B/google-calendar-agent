@@ -1,70 +1,89 @@
-# Getting Started with Create React App
+# Calendar Assistant App
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A smart calendar management application that combines Google Calendar integration with natural language processing to help you manage your schedule more efficiently.
 
-## Available Scripts
+## Features
 
-In the project directory, you can run:
+- **Natural Language Processing**: Interact with your calendar using everyday language
+  - "What do I have next weekend?"
+  - "Schedule a meeting with the team on Friday at 2pm"
+  - "Reschedule my dentist appointment to next Tuesday"
+  
+- **Calendar Integration**: Connect with Google Calendar
+  - View and manage multiple calendars
+  - Set preferred calendars for different types of events
+  
+- **Smart Event Management**:
+  - Find free time slots in your schedule
+  - Create, modify, and delete events
+  - View upcoming events filtered by date, calendar, or event type
 
-### `npm start`
+## Technology Stack
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- **Frontend**: React.js
+- **Backend**: Flask (Python)
+- **APIs**: Google Calendar API
+- **NLP**: Custom intent recognition and parameter extraction
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Setup Instructions
 
-### `npm test`
+### Prerequisites
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+- Node.js and npm
+- Python 3.7+
+- Google API credentials
 
-### `npm run build`
+### Installation
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+1. Clone the repository
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+2. Install frontend dependencies:
+   ```
+   npm install
+   ```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+3. Install backend dependencies:
+   ```
+   pip install flask google-auth-oauthlib google-auth-httplib2 google-api-python-client
+   ```
 
-### `npm run eject`
+4. Set up Google Calendar API:
+   - Create a project in Google Developer Console
+   - Enable the Google Calendar API
+   - Create OAuth credentials
+   - Download the credentials as `credentials.json` and place in the project root
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### Running the Application
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+1. Start the Flask backend:
+   ```
+   python app.py
+   ```
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+2. In a separate terminal, start the React frontend:
+   ```
+   npm start
+   ```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+3. Open your browser and navigate to `http://localhost:3000`
 
-## Learn More
+4. On first run, you'll be prompted to authorize access to your Google Calendar
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## Usage Examples
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+### View Events
+- "What's on my calendar tomorrow?"
+- "Show me my meetings for next week"
+- "What do I have scheduled in my Work calendar?"
 
-### Code Splitting
+### Create Events
+- "Schedule lunch with Alex on Friday at noon"
+- "Add CMPT 310 lecture every Tuesday and Thursday from 2:30pm to 4:20pm"
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+### Modify Events
+- "Reschedule my dentist appointment to next Monday at 9am"
+- "Move my team meeting to the afternoon"
 
-### Analyzing the Bundle Size
+## License
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+This project is licensed under the MIT License - see the LICENSE file for details.
