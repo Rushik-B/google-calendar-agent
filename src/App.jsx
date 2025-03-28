@@ -1,19 +1,42 @@
-import React, { useState, useEffect, useCallback, memo, useMemo, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useCallback, memo, useMemo, Suspense, lazy, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
-// Remove lazy loading for FullCalendar and its plugins
-// Old code:
-// const FullCalendar = lazy(() => import('@fullcalendar/react'));
-// const dayGridPlugin = lazy(() => import('@fullcalendar/daygrid'));
-// const timeGridPlugin = lazy(() => import('@fullcalendar/timegrid'));
-// const interactionPlugin = lazy(() => import('@fullcalendar/interaction'));
+// Import our Chat UI components instead of the old NewUI
+import { ChatHeader, ChatContainer, ChatMessages, ChatMessage, ChatInput, SettingsButton, CalendarSettings, WelcomeMessage, CalendarSelectionComponent, RecommendationBar } from './ChatUI';
 
-// New code: import synchronously
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
 import interactionPlugin from '@fullcalendar/interaction';
+
+// SVG Path Icons for recommendation buttons
+const ICONS = {
+  SCHEDULE: "M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z",
+  FREE_TIME: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z",
+  MEETINGS: "M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10",
+  BREAK: "M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+  ASSIGNMENT: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
+  REMINDER: "M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+};
+
+// Colors for suggestion pills
+const COLORS = {
+  BLUE: 'rgba(99, 179, 237, 0.25)',    // Vibrant blue with higher opacity
+  GREEN: 'rgba(72, 187, 120, 0.25)',   // Fresh green with higher opacity
+  ORANGE: 'rgba(246, 173, 85, 0.25)',  // Warm orange with higher opacity
+  PURPLE: 'rgba(159, 122, 234, 0.25)', // Rich purple with higher opacity
+  RED: 'rgba(245, 101, 101, 0.25)'     // Bright red with higher opacity
+};
+
+// Popular command suggestions with truncated text
+const DEFAULT_SUGGESTIONS = [
+  { text: "Schedule a meeting tomorrow at 2pm", color: COLORS.BLUE, icon: ICONS.SCHEDULE },
+  { text: "Find me free time this week", color: COLORS.GREEN, icon: ICONS.FREE_TIME },
+  { text: "What meetings do I have today?", color: COLORS.PURPLE, icon: ICONS.MEETINGS },
+  { text: "Schedule a 30-minute break", color: COLORS.ORANGE, icon: ICONS.BREAK },
+  { text: "Find time to work on my assignment", color: COLORS.RED, icon: ICONS.ASSIGNMENT }
+];
 
 // Define the script at global level to ensure the functions are globally accessible
 const setupGlobalFunctions = () => {
@@ -140,44 +163,7 @@ const CalendarComponent = memo(({
 
 CalendarComponent.displayName = 'CalendarComponent';
 
-// The calendar selection component
-const CalendarSelectionComponent = memo(({ calendars, selected, onSelect, disabled }) => {
-  return (
-    <div className="calendar-selection">
-      <h3>Select Calendars to Monitor:</h3>
-      {calendars.length > 0 ? (
-        calendars.map((cal) => (
-          <label key={cal.id} style={{ 
-            display: 'block', 
-            margin: '5px 0',
-            padding: '8px',
-            backgroundColor: selected.some(s => s.id === cal.id) ? '#f0f7ff' : 'transparent',
-            borderRadius: '4px',
-            cursor: disabled ? 'not-allowed' : 'pointer'
-          }}>
-            <input
-              type="checkbox"
-              checked={selected.some((s) => s.id === cal.id)}
-              onChange={() => onSelect(cal)}
-              disabled={disabled}
-            />
-            <span style={{
-              marginLeft: '8px',
-              color: cal.primary ? '#1a73e8' : 'inherit',
-              fontWeight: cal.primary ? '500' : 'normal'
-            }}>
-              {cal.summary} {cal.primary ? '(Primary)' : ''}
-            </span>
-          </label>
-        ))
-      ) : (
-        <p>Loading calendars...</p>
-      )}
-    </div>
-  );
-});
-
-CalendarSelectionComponent.displayName = 'CalendarSelectionComponent';
+// Note: We're using CalendarSelectionComponent from ChatUI.jsx
 
 function NaturalLanguageForm() {
   const [text, setText] = useState("");
@@ -195,9 +181,22 @@ function NaturalLanguageForm() {
   const [eventsCache, setEventsCache] = useState({});
   const [fetchingEvents, setFetchingEvents] = useState(false);
   
+  // Chat-specific state
+  const [chatMessages, setChatMessages] = useState([]);
+  const [showSettings, setShowSettings] = useState(false);
+  
+  // Recommendation system state
+  const [suggestions, setSuggestions] = useState([]);
+  const [showRecommendations, setShowRecommendations] = useState(false);
+  
   // Call the setup function on load
   useEffect(() => {
     setupGlobalFunctions();
+    // Add welcome message
+    setChatMessages([{ sender: 'bot', type: 'welcome' }]);
+    
+    // Load saved popular commands from localStorage
+    loadPopularCommands();
   }, []);
   
   const [calendars, setCalendars] = useState([]);
@@ -412,19 +411,128 @@ function NaturalLanguageForm() {
     }
   }, [dateRange, formatDate, getCalendarColor, selectedCalendars, eventsCache, fetchingEvents, setError]);
 
-  // Define handleSubmit with useCallback before it's used in handleScheduleItem
+  // Recommendation system functions
+  const loadPopularCommands = () => {
+    try {
+      const savedCommands = localStorage.getItem('popularCommands');
+      if (savedCommands) {
+        const commands = JSON.parse(savedCommands);
+        // Get top 5 most used commands
+        const topCommands = commands
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 5);
+          
+        if (topCommands.length > 0) {
+          // Format commands with icons and colors
+          const formattedCommands = topCommands.map((cmd, index) => {
+            // Detect command type to assign appropriate icon and color
+            let icon = ICONS.SCHEDULE;
+            let color = COLORS.BLUE;
+            
+            const lowerText = cmd.text.toLowerCase();
+            
+            if (lowerText.includes('free time') || lowerText.includes('availability')) {
+              icon = ICONS.FREE_TIME;
+              color = COLORS.GREEN;
+            } else if (lowerText.includes('meeting') || lowerText.includes('have') || lowerText.includes('scheduled')) {
+              icon = ICONS.MEETINGS;
+              color = COLORS.PURPLE;
+            } else if (lowerText.includes('break') || lowerText.includes('rest')) {
+              icon = ICONS.BREAK;
+              color = COLORS.ORANGE;
+            } else if (lowerText.includes('assignment') || lowerText.includes('work on')) {
+              icon = ICONS.ASSIGNMENT;
+              color = COLORS.RED;
+            } else if (lowerText.includes('remind') || lowerText.includes('notification')) {
+              icon = ICONS.REMINDER;
+              color = COLORS.ORANGE;
+            }
+            
+            return {
+              text: cmd.text,
+              count: cmd.count,
+              icon,
+              color
+            };
+          });
+          
+          setSuggestions(formattedCommands);
+          setShowRecommendations(true);
+        } else {
+          setSuggestions(DEFAULT_SUGGESTIONS);
+          setShowRecommendations(true);
+        }
+      } else {
+        // No saved commands, use defaults
+        setSuggestions(DEFAULT_SUGGESTIONS);
+        setShowRecommendations(true);
+      }
+    } catch (error) {
+      console.error('Error loading popular commands:', error);
+      setSuggestions(DEFAULT_SUGGESTIONS);
+      setShowRecommendations(true);
+    }
+  };
+  
+  const trackCommand = (commandText) => {
+    try {
+      // Skip tracking empty commands
+      if (!commandText.trim()) return;
+      
+      // Get existing commands or initialize empty array
+      const existingCommands = JSON.parse(localStorage.getItem('popularCommands') || '[]');
+      
+      // Check if this command already exists
+      const existingIndex = existingCommands.findIndex(
+        cmd => cmd.text.toLowerCase() === commandText.toLowerCase()
+      );
+      
+      if (existingIndex >= 0) {
+        // Increment count for existing command
+        existingCommands[existingIndex].count += 1;
+        existingCommands[existingIndex].lastUsed = new Date().toISOString();
+      } else {
+        // Add new command
+        existingCommands.push({
+          text: commandText,
+          count: 1,
+          lastUsed: new Date().toISOString()
+        });
+      }
+      
+      // Save back to localStorage
+      localStorage.setItem('popularCommands', JSON.stringify(existingCommands));
+      
+      // Update suggestions
+      loadPopularCommands();
+    } catch (error) {
+      console.error('Error tracking command:', error);
+    }
+  };
+  
+  const handleSelectSuggestion = (suggestion) => {
+    setText(suggestion);
+    // Focus the input field
+    document.querySelector('.chat-input textarea').focus();
+  };
+
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault();
     console.log("handleSubmit called with text:", text);
     if (!text.trim()) return;
 
+    // Track the command for the recommendation system
+    trackCommand(text);
+
+    // Add user message to chat
+    setChatMessages(prev => [...prev, { sender: 'user', content: text }]);
+    
     setLoading(true);
     setError("");
     setMessage("");
     setAvailableSlots([]);
     setCalendarEvents([]);
     setSelectedSlots([]);
-    setShowCalendar(false);
 
     try {
       console.log("Making API call with text:", text);
@@ -434,25 +542,21 @@ function NaturalLanguageForm() {
       console.log("API response:", response.data);
 
       if (response.data.success) {
-        // Use humanizedResponse from backend if available
+        // Handle the response in chat format
         if (response.data.humanizedResponse) {
           if (response.data.intent === "check_free_time") {
-            // For check_free_time intent, we need to render HTML
-            setMessage('');
-            // Use a timeout to ensure state updates don't conflict
-            setTimeout(() => {
-              const messageElement = document.querySelector('.success-message');
-              if (messageElement) {
-                messageElement.innerHTML = response.data.humanizedResponse;
-              } else {
-                // Fallback in case the element isn't found
-                setMessage(response.data.humanizedResponse);
-              }
-            }, 10);
+            // For check_free_time intent with HTML
+            setChatMessages(prev => [...prev, { 
+              sender: 'bot', 
+              content: response.data.humanizedResponse 
+            }]);
             setText("");
           } else {
-            // For other intents, just set the text message
-            setMessage(response.data.humanizedResponse);
+            // For other intents with text response
+            setChatMessages(prev => [...prev, { 
+              sender: 'bot', 
+              content: response.data.humanizedResponse 
+            }]);
           }
         }
         
@@ -463,15 +567,18 @@ function NaturalLanguageForm() {
           
           // Check if we have the insufficientTime flag
           if (response.data.insufficientTime) {
-            // eslint-disable-next-line no-unused-vars
-            const requestedHours = response.data.requestedHours;
-            // eslint-disable-next-line no-unused-vars
-            const foundHours = response.data.foundHours;
-            // Use the humanizedResponse for error message if available
-            setError(`INSUFFICIENT TIME: ${response.data.humanizedResponse || response.data.message} Select these slots or try a different timeframe.`);
+            // Add error message to chat
+            setChatMessages(prev => [...prev, { 
+              sender: 'bot', 
+              type: 'error',
+              content: `INSUFFICIENT TIME: ${response.data.humanizedResponse || response.data.message} Select these slots or try a different timeframe.` 
+            }]);
           } else if (!response.data.humanizedResponse) {
             // Only set this default message if humanizedResponse wasn't already set
-            setMessage("Here are suggested time slots on your calendar. Click on slots to select/deselect them for scheduling.");
+            setChatMessages(prev => [...prev, { 
+              sender: 'bot', 
+              content: "Here are suggested time slots on your calendar. Click on slots to select/deselect them for scheduling." 
+            }]);
           }
           
           setEventDetails({
@@ -484,22 +591,35 @@ function NaturalLanguageForm() {
           setText("");
         } else if (response.data.intent === "Create event" && !response.data.humanizedResponse) {
           // Fallback for create event if no humanizedResponse is available
-          setMessage(`Event created! ${response.data.eventLink ? `View it here: ${response.data.eventLink}` : ''}`);
+          setChatMessages(prev => [...prev, { 
+            sender: 'bot', 
+            type: 'success',
+            content: `Event created! ${response.data.eventLink ? `View it here: ${response.data.eventLink}` : ''}` 
+          }]);
           setText("");
         } else {
           // For other intents or if we already set humanizedResponse
           setText("");
         }
       } else {
-        setError(`Error: ${response.data.humanizedResponse || response.data.message}`);
+        // Add error message to chat
+        setChatMessages(prev => [...prev, { 
+          sender: 'bot', 
+          type: 'error',
+          content: `Error: ${response.data.humanizedResponse || response.data.message}` 
+        }]);
       }
     } catch (error) {
-      setError(`Error: ${error.response?.data?.message || error.message}`);
+      // Add error message to chat
+      setChatMessages(prev => [...prev, { 
+        sender: 'bot', 
+        type: 'error',
+        content: `Error: ${error.response?.data?.message || error.message}` 
+      }]);
     } finally {
       setLoading(false);
     }
-  }, [text, setLoading, setError, setMessage, setAvailableSlots, setCalendarEvents, 
-      setSelectedSlots, setShowCalendar, setText, setEventDetails]);
+  }, [text, setLoading, setText, setChatMessages, setAvailableSlots, setCalendarEvents, setSelectedSlots, setShowCalendar, setEventDetails]);
 
   // Event handler for scheduling items - using useCallback to avoid dependency issues
   const handleScheduleItem = useCallback((event) => {
@@ -736,24 +856,45 @@ function NaturalLanguageForm() {
       const allSuccessful = results.every(r => r.data.success);
       
       if (allSuccessful) {
-        setMessage(`All ${selectedSlots.length} events scheduled successfully!`);
+        // Add success message to chat
+        setChatMessages(prev => [...prev, { 
+          sender: 'bot', 
+          type: 'success',
+          content: `All ${selectedSlots.length} events scheduled successfully!` 
+        }]);
+        
         setText("");
         setShowCalendar(false);
         setAvailableSlots([]);
         setCalendarEvents([]);
         setSelectedSlots([]);
       } else {
-        setError(`Error: Some events could not be scheduled.`);
+        // Add error message to chat
+        setChatMessages(prev => [...prev, { 
+          sender: 'bot', 
+          type: 'error',
+          content: `Error: Some events could not be scheduled.` 
+        }]);
       }
     } catch (error) {
-      setError(`Error: ${error.response?.data?.message || error.message}`);
+      // Add error message to chat
+      setChatMessages(prev => [...prev, { 
+        sender: 'bot', 
+        type: 'error',
+        content: `Error: ${error.response?.data?.message || error.message}` 
+      }]);
     } finally {
       setLoading(false);
     }
   };
 
   const handleFindDifferentTimes = () => {
-    setMessage("Let's find another time. Please provide more details:");
+    // Add message to chat
+    setChatMessages(prev => [...prev, { 
+      sender: 'bot', 
+      content: "Let's find another time. Please provide more details:"
+    }]);
+    
     setShowCalendar(false);
     setAvailableSlots([]);
     setCalendarEvents([]);
@@ -807,41 +948,17 @@ function NaturalLanguageForm() {
   // Precalculate events to avoid useMemo in render
   const currentEvents = getAllEvents();
 
-  return (
-    <div className="natural-language-form">
-      <h2>Create Event with Natural Language</h2>
-
-      <CalendarSelectionComponent 
-        calendars={calendars}
-        selected={selectedCalendars}
-        onSelect={handleCalendarSelect}
-        disabled={loading}
-      />
-
-      {error && <div className="error-message">{error}</div>}
-      {message && <div className="success-message" dangerouslySetInnerHTML={{ __html: message }} />}
-
-      {!showCalendar ? (
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Describe your event:</label>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              disabled={loading}
-              rows={3}
-              placeholder="e.g., 'Schedule a team meeting next Tuesday at 2pm' or 'Find me time to work on my project tomorrow afternoon'"
-              required
-            />
-          </div>
-          <button type="submit" disabled={loading} className="submit-button">
-            {loading ? 'Processing...' : 'Submit'}
-          </button>
-        </form>
-      ) : (
-        <div className="calendar-view">
+  // Render calendar in a chat message
+  const renderCalendarMessage = () => {
+    if (!showCalendar) return null;
+    
+    const currentEvents = getAllEvents();
+    
+    return (
+      <ChatMessage sender="bot" isCalendarView={true} className="calendar-message">
+        <div className="calendar-view w-full">
           {selectedSlots.length > 0 && (
-            <div className="selection-summary">
+            <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-4 text-blue-800 font-medium">
               <p>Selected {selectedSlots.length} slot(s) - Total time: {calculateTotalHours()}</p>
             </div>
           )}
@@ -885,31 +1002,433 @@ function NaturalLanguageForm() {
             renderEventContent={renderEventContent}
           />
           
-          <div className="calendar-actions">
+          <div className="flex mt-6 space-x-4">
             <button
               onClick={handleScheduleSelected}
               disabled={selectedSlots.length === 0 || loading}
-              className="confirm-button"
+              className={`
+                px-6 py-3 rounded-lg font-medium flex items-center justify-center
+                ${selectedSlots.length === 0 || loading 
+                  ? 'bg-gray-300 cursor-not-allowed text-gray-500' 
+                  : 'bg-green-600 hover:bg-green-700 text-white shadow-md hover:shadow-lg transition-all duration-200'}
+              `}
             >
-              {loading ? 'Scheduling...' : `Schedule ${selectedSlots.length} Selected Time${selectedSlots.length === 1 ? '' : 's'}`}
+              {loading ? (
+                <div className="flex items-center">
+                  <svg className="animate-spin -ml-1 mr-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Scheduling...
+                </div>
+              ) : `Schedule ${selectedSlots.length} Selected Time${selectedSlots.length === 1 ? '' : 's'}`}
             </button>
             <button
               onClick={handleFindDifferentTimes}
               disabled={loading}
-              className="reject-button"
+              className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium shadow-md hover:shadow-lg transition-all duration-200"
             >
               Find Different Times
             </button>
           </div>
         </div>
-      )}
+      </ChatMessage>
+    );
+  };
+
+  // Format events in a user-friendly way
+  const formatStyledEventList = (responseText) => {
+    console.log("Formatting response:", responseText); // Debug to see what's being processed
+    
+    // First, check for specific format with Cmpt 310 or other course names
+    if (responseText.includes("Cmpt 310") || responseText.includes("CMPT 310")) {
+      try {
+        // Extract date more flexibly
+        let dateMatch = responseText.match(/for\s+([A-Za-z]+\s+\d+(?:st|nd|rd|th)?,\s+\d{4})/i);
+        const dateStr = dateMatch ? dateMatch[1] : "Today";
+        
+        // Simpler regex to match formatted times and course info
+        const eventPattern = /\*\*([^*]+)\*\*:\s*([^*\n]+?)(?:\sin\s+([^*\n]*))?(?=\s*\*\*|\s*$)/g;
+        let match;
+        const events = [];
+        
+        while ((match = eventPattern.exec(responseText)) !== null) {
+          console.log("Matched event:", match); // Debug
+          const timeRange = match[1].trim();
+          const title = match[2].trim();
+          const location = match[3] ? match[3].trim() : '';
+          
+          events.push({
+            timeRange,
+            title,
+            location,
+            duration: calculateDuration(timeRange)
+          });
+        }
+        
+        // If we couldn't extract events with the regex, try a direct approach for the specific format
+        if (events.length === 0 && responseText.includes("AM") && responseText.includes("PM")) {
+          // Direct parsing for the specific format in the image
+          const timeMatch = responseText.match(/(\d+:\d+\s*(?:AM|PM)\s*-\s*\d+:\d+\s*(?:AM|PM))/i);
+          const courseMatch = responseText.match(/Cmpt\s+\d+|CMPT\s+\d+/i);
+          const locationMatch = responseText.match(/at\s+([A-Z]+\s+\d+)/i);
+          
+          if (timeMatch && courseMatch) {
+            events.push({
+              timeRange: timeMatch[1].trim(),
+              title: courseMatch[0].trim() + (responseText.includes("OH") ? " Office Hours" : ""),
+              location: locationMatch ? locationMatch[1].trim() : "",
+              duration: calculateDuration(timeMatch[1].trim())
+            });
+            console.log("Direct parse event:", events[0]); // Debug
+          }
+        }
+        
+        // If we extracted events, format them nicely
+        if (events.length > 0) {
+          // Generate intro text
+          const introMatch = responseText.match(/^([^*]+)/);
+          const introText = introMatch ? introMatch[0].trim() : `Here's your schedule for ${dateStr}:`;
+          
+          return generateEventHTML(introText, dateStr, events);
+        }
+      } catch (error) {
+        console.error("Error formatting events:", error);
+      }
+    }
+    
+    // Check if this is a schedule/calendar response with events
+    if ((responseText.includes("schedule") || responseText.includes("calendar") || 
+         responseText.includes("looks like for") || responseText.includes("have") || 
+         responseText.includes("Monday") || responseText.includes("monday")) && 
+        (responseText.includes("**") || responseText.includes("AM") || responseText.includes("PM"))) {
+      try {
+        // Extract date
+        let dateMatch = responseText.match(/(?:for|on)\s+([A-Za-z]+\s+\d+(?:st|nd|rd|th)?,\s+\d{4})/i);
+        const dateStr = dateMatch ? dateMatch[1] : 
+                       (responseText.toLowerCase().includes("monday") ? "Monday" : "Today");
+        
+        // Parse events from the text - improved regex pattern to better capture events
+        const eventPattern = /\*\*([0-9:.APM\s-]+)\*\*:\s*([^*\n]+?)(?:\sin\s+([^*\n]*))?(?=\s*\*\*|\s*$)/g;
+        let match;
+        const events = [];
+        
+        while ((match = eventPattern.exec(responseText)) !== null) {
+          const timeRange = match[1].trim();
+          const title = match[2].trim();
+          const location = match[3] ? match[3].trim() : '';
+          
+          events.push({
+            timeRange,
+            title,
+            location,
+            duration: calculateDuration(timeRange)
+          });
+        }
+        
+        // Try alternative pattern if no events found
+        if (events.length === 0) {
+          const altPattern = /(\d+(?::\d+)?\s*(?:AM|PM)\s*-\s*\d+(?::\d+)?\s*(?:AM|PM))[\s:]*([^()\n,]+)(?:\s+in\s+([^()\n,]+))?/gi;
+          while ((match = altPattern.exec(responseText)) !== null) {
+            events.push({
+              timeRange: match[1].trim(),
+              title: match[2].trim(),
+              location: match[3] ? match[3].trim() : '',
+              duration: calculateDuration(match[1].trim())
+            });
+          }
+        }
+        
+        // If we extracted events, format them nicely
+        if (events.length > 0) {
+          // Generate intro text
+          const introMatch = responseText.match(/^([^*]+)/);
+          const introText = introMatch ? introMatch[0].trim() : `Here's your schedule for ${dateStr}:`;
+          
+          return generateEventHTML(introText, dateStr, events);
+        } else {
+          // If we still couldn't find events, fall back to default formatting
+          return defaultStyledFormat(responseText);
+        }
+      } catch (error) {
+        console.error("Error formatting events:", error);
+        return defaultStyledFormat(responseText);
+      }
+    }
+    
+    // For regular text responses, make them more visually interesting
+    if (!responseText.includes("<div") && !responseText.includes("<p") && !responseText.includes("<ul")) {
+      // If it mentions free time, use a special format
+      if (responseText.toLowerCase().includes("free time") || 
+          responseText.toLowerCase().includes("available") || 
+          responseText.toLowerCase().includes("time slot")) {
+        return generateFreeTimeHTML(responseText);
+      }
+      
+      // If it's a confirmation or completion message
+      if (responseText.toLowerCase().includes("scheduled") || 
+          responseText.toLowerCase().includes("created") || 
+          responseText.toLowerCase().includes("added")) {
+        return generateConfirmationHTML(responseText);
+      }
+      
+      // Default enhanced format for other responses
+      return defaultStyledFormat(responseText);
+    }
+    
+    // Return original if no formatting applied
+    return responseText;
+  };
+  
+  // Helper function to calculate duration from a time range
+  const calculateDuration = (timeRange) => {
+    if (!timeRange || !timeRange.includes("-")) return "";
+    
+    try {
+      const [startTime, endTime] = timeRange.split("-").map(t => t.trim());
+      
+      const parseTime = (timeStr) => {
+        const [time, modifier] = timeStr.split(/\s+/);
+        let [hours, minutes] = (time || "").split(':').map(Number);
+        minutes = minutes || 0;
+        if (modifier && modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
+        if (modifier && modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
+        return hours * 60 + minutes;
+      };
+      
+      const startMinutes = parseTime(startTime);
+      const endMinutes = parseTime(endTime);
+      const durationMinutes = endMinutes - startMinutes;
+      
+      if (durationMinutes > 0) {
+        const hours = Math.floor(durationMinutes / 60);
+        const mins = durationMinutes % 60;
+        return hours > 0 
+          ? `${hours} hour${hours > 1 ? 's' : ''}${mins > 0 ? ` ${mins} min` : ''}` 
+          : `${mins} min`;
+      }
+      return "";
+    } catch (e) {
+      console.error("Error calculating duration:", e);
+      return "";
+    }
+  };
+  
+  // Helper function to generate HTML for events
+  const generateEventHTML = (introText, dateStr, events) => {
+    return `
+      <div>
+        <p>${introText}</p>
+        <div class="styled-event-list">
+          <div class="event-date">${dateStr}</div>
+          ${events.map(event => {
+            // Determine background color based on event title (for courses)
+            let bgColor = '#e5edff'; // default blue background
+            let iconColor = '#3b82f6'; // default blue icon
+            
+            if (event.title.includes('CMPT 310') || event.title.includes('Cmpt 310')) {
+              bgColor = '#f3e8ff'; // purple for CMPT 310
+              iconColor = '#8b5cf6';
+            } else if (event.title.includes('CMPT 213') || event.title.includes('Cmpt 213')) {
+              bgColor = '#e0f2fe'; // light blue for CMPT 213
+              iconColor = '#0ea5e9';
+            } else if (event.title.includes('CMPT 276') || event.title.includes('Cmpt 276')) {
+              bgColor = '#dcfce7'; // green for CMPT 276
+              iconColor = '#22c55e';
+            } else if (event.title.includes('CMPT 105W') || event.title.includes('Cmpt 105W')) {
+              bgColor = '#ffedd5'; // orange for CMPT 105W
+              iconColor = '#f97316';
+            } else if (event.title.includes('OH') || event.title.includes('Office Hours')) {
+              bgColor = '#ffe4e6'; // pink for Office Hours
+              iconColor = '#e11d48';
+            }
+            
+            return `
+            <div class="event-item">
+              <div class="event-item-icon" style="background-color: ${bgColor}; color: ${iconColor};">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+              </div>
+              <div>
+                <div class="event-time">${event.timeRange}</div>
+                <div class="event-content">
+                  <div class="event-title">${event.title}</div>
+                  ${event.location ? `
+                    <div class="event-location">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                        <circle cx="12" cy="10" r="3"></circle>
+                      </svg>
+                      ${event.location}
+                    </div>
+                  ` : ''}
+                  ${event.duration ? `<div class="event-duration">${event.duration}</div>` : ''}
+                </div>
+              </div>
+            </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  };
+  
+  // Helper function for free time format
+  const generateFreeTimeHTML = (responseText) => {
+    return `
+      <div class="styled-event-list">
+        <div class="event-item">
+          <div class="event-item-icon" style="background-color: #ebf7ee; color: #34d399;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+              <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+          </div>
+          <div class="event-content">
+            <p>${responseText}</p>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+  
+  // Helper function for confirmation format
+  const generateConfirmationHTML = (responseText) => {
+    return `
+      <div class="styled-event-list">
+        <div class="event-item">
+          <div class="event-item-icon" style="background-color: #e5edff; color: #3b82f6;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+          </div>
+          <div class="event-content">
+            <p>${responseText}</p>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+  
+  // Helper function for default format
+  const defaultStyledFormat = (responseText) => {
+    return `
+      <div class="styled-event-list">
+        <div class="event-item">
+          <div class="event-item-icon" style="background-color: #f5f3ff; color: #8b5cf6;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+          </div>
+          <div class="event-content">
+            <p>${responseText}</p>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  // Render message content based on type
+  const renderMessage = (message, index) => {
+    if (message.type === 'welcome') {
+      return <WelcomeMessage key={index} />;
+    }
+    
+    if (message.type === 'error') {
+      return (
+        <ChatMessage 
+          key={index} 
+          sender={message.sender} 
+          content={`<div class="error-content">${message.content}</div>`} 
+        />
+      );
+    }
+    
+    if (message.type === 'success') {
+      return (
+        <ChatMessage 
+          key={index} 
+          sender={message.sender} 
+          content={`<div class="success-content">${message.content}</div>`} 
+        />
+      );
+    }
+    
+    // Format event lists in responses
+    const formattedContent = message.sender === 'bot' 
+      ? formatStyledEventList(message.content) 
+      : message.content;
+    
+    return (
+      <ChatMessage 
+        key={index} 
+        sender={message.sender} 
+        content={formattedContent} 
+      />
+    );
+  };
+
+  return (
+    <div className="w-full h-full">
+      <ChatContainer>
+        <div className="relative">
+          <ChatHeader />
+          <SettingsButton 
+            onClick={() => setShowSettings(!showSettings)} 
+            isOpen={showSettings} 
+          />
+        </div>
+        
+        <div className={`settings-transition ${showSettings ? 'settings-open' : 'settings-closed'}`}>
+          {showSettings && (
+            <CalendarSettings 
+              calendars={calendars}
+              selected={selectedCalendars}
+              onSelect={handleCalendarSelect}
+              disabled={loading}
+            />
+          )}
+        </div>
+        
+        <ChatMessages>
+          {chatMessages.map((msg, idx) => renderMessage(msg, idx))}
+          {showCalendar && renderCalendarMessage()}
+        </ChatMessages>
+        
+        {showRecommendations && suggestions.length > 0 && (
+          <RecommendationBar 
+            suggestions={suggestions} 
+            onSelectSuggestion={handleSelectSuggestion} 
+          />
+        )}
+        
+        <ChatInput
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onSubmit={handleSubmit}
+          loading={loading}
+        />
+      </ChatContainer>
     </div>
   );
 }
 
 function App() {
   return (
-    <div className="App">
+    <div className="App w-full">
+      <h1 className="app-title">Calendar Companion</h1>
+      <div className="app-container">
+        <Suspense fallback={<div className="text-center p-10 text-white">Loading application...</div>}>
+          <NaturalLanguageForm />
+        </Suspense>
+      </div>
+      
       <script dangerouslySetInnerHTML={{
         __html: `
           // Directly define functions in the global scope
@@ -1017,183 +1536,6 @@ function App() {
           console.log("Inline scheduling functions defined and attached to window object");
         `
       }} />
-      <style jsx="true">{`
-        .success-message {
-          white-space: pre-line;
-          line-height: 1.5;
-          padding: 15px;
-          border-radius: 8px;
-          background-color: #f5f5f5;
-          margin: 15px 0;
-        }
-        
-        .success-message b {
-          font-weight: 600;
-        }
-        
-        .time-slot {
-          font-weight: 500;
-          color: #1a73e8;
-        }
-        
-        .free-time-card {
-          background-color: #e8f5e9;
-          border-radius: 8px;
-          padding: 15px;
-          margin: 10px 0;
-        }
-        
-        .free-time-actions {
-          display: flex;
-          gap: 10px;
-          margin-top: 15px;
-        }
-        
-        .action-button {
-          background-color: #4caf50;
-          color: white;
-          border: none;
-          border-radius: 4px;
-          padding: 8px 16px;
-          cursor: pointer;
-          font-size: 14px;
-          transition: background-color 0.3s;
-        }
-        
-        .action-button:hover {
-          background-color: #388e3c;
-        }
-        
-        .action-button.small {
-          padding: 4px 12px;
-          font-size: 12px;
-        }
-        
-        .slot-item {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 6px 10px;
-          margin: 8px 0;
-          background-color: #f0f8ff;
-          border-radius: 4px;
-        }
-        
-        .duration-selector {
-          background-color: #f9f9f9;
-          border-radius: 6px;
-          padding: 12px;
-          margin-top: 10px;
-          border: 1px solid #ddd;
-        }
-        
-        .duration-selector input[type="range"] {
-          width: 100%;
-          margin: 10px 0;
-        }
-        
-        .action-button.secondary {
-          background-color: #9e9e9e;
-        }
-        
-        .action-button.secondary:hover {
-          background-color: #757575;
-        }
-        
-        .loading-calendar {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 500px;
-          background-color: #f9f9f9;
-          border-radius: 8px;
-          font-size: 18px;
-          color: #666;
-          border: 1px dashed #ddd;
-        }
-        
-        .loading-calendar::after {
-          content: "";
-          display: inline-block;
-          width: 20px;
-          height: 20px;
-          margin-left: 10px;
-          border: 3px solid #ddd;
-          border-top-color: #3498db;
-          border-radius: 50%;
-          animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-          to {
-            transform: rotate(360deg);
-          }
-        }
-        
-        .calendar-container {
-          position: relative;
-          min-height: 500px;
-        }
-        
-        .calendar-container::before {
-          content: "";
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background-color: rgba(255, 255, 255, 0.7);
-          z-index: 5;
-          display: none;
-        }
-        
-        .calendar-container.loading::before {
-          display: block;
-        }
-        
-        .fc-event {
-          transition: background-color 0.2s ease;
-        }
-        
-        .fc-event:hover {
-          filter: brightness(110%);
-        }
-        
-        .suggested-event-color {
-          background-color: #8bc34a;
-        }
-        
-        .selected-event-color {
-          background-color: #4caf50;
-        }
-        
-        .event-content {
-          padding: 2px 4px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          font-size: 12px;
-        }
-        
-        .suggested-event {
-          font-weight: bold;
-        }
-        
-        /* Optimize rendering performance */
-        .fc-view-harness {
-          contain: content;
-          will-change: transform;
-        }
-        
-        /* Prevent layout shifts */
-        .natural-language-form {
-          min-height: 800px;
-        }
-      `}</style>
-      <Suspense fallback={<div>Loading application...</div>}>
-        <NaturalLanguageForm />
-      </Suspense>
-      <hr />
     </div>
   );
 }
